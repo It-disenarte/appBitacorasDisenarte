@@ -4,12 +4,17 @@ procesos: corte, router, laminado, rotulación, impresión, instalación, montaj
 equipos: plotter, impresora de gran formato, router CNC, laminadora.
 Escribe estos términos correctamente aunque el audio suene distinto.`;
 
-const MODELOS = () => [
+const MODELOS = () => [...new Set([
   process.env.GEMINI_MODEL,
   'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-flash-latest'
-].filter(Boolean);
+  'gemini-flash-latest',
+  'gemini-2.5-flash-lite',
+  'gemini-flash-lite-latest'
+].filter(Boolean))];
+
+const espera = (ms) => new Promise(r => setTimeout(r, ms));
+/* Errores temporales: vale la pena reintentar o cambiar de modelo. */
+const TEMPORAL = new Set([429, 500, 502, 503, 504]);
 
 /* Lee el body venga como objeto, string o stream. */
 export async function leerBody(req) {
@@ -27,32 +32,37 @@ export async function callGemini(parts, { json = false } = {}) {
 
   let ultimo = '';
   for (const model of MODELOS()) {
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts }],
-          generationConfig: json
-            ? { responseMimeType: 'application/json', temperature: 0.3 }
-            : { temperature: 0.2 }
-        })
+    // Dos intentos por modelo: los 503 de Google suelen ser picos de segundos.
+    for (let intento = 0; intento < 2; intento++) {
+      if (intento) await espera(1200);
+      const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts }],
+            generationConfig: json
+              ? { responseMimeType: 'application/json', temperature: 0.3 }
+              : { temperature: 0.2 }
+          })
+        }
+      );
+      if (r.ok) {
+        const j = await r.json();
+        const texto = j.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
+        if (texto) return texto;
+        ultimo = `El modelo ${model} respondió vacío (${j.candidates?.[0]?.finishReason || 'sin razón'}).`;
+        break;
       }
-    );
-    if (r.ok) {
-      const j = await r.json();
-      const texto = j.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
-      if (texto) return texto;
-      ultimo = `El modelo ${model} respondió vacío (${j.candidates?.[0]?.finishReason || 'sin razón'}).`;
-      continue;
+      const cuerpo = await r.text();
+      let msg = cuerpo;
+      try { msg = JSON.parse(cuerpo).error?.message || cuerpo; } catch {}
+      ultimo = `${model} → ${r.status}: ${msg}`;
+      // 404: el modelo no existe con esta key. Temporal: reintentar y luego cambiar de modelo.
+      if (r.status === 404) break;
+      if (!TEMPORAL.has(r.status)) return Promise.reject(new Error(ultimo));
     }
-    const cuerpo = await r.text();
-    let msg = cuerpo;
-    try { msg = JSON.parse(cuerpo).error?.message || cuerpo; } catch {}
-    ultimo = `${model} → ${r.status}: ${msg}`;
-    // 404 = modelo inexistente: probar el siguiente. Otro error: no insistir.
-    if (r.status !== 404) break;
   }
   throw new Error(ultimo || 'Gemini no respondió.');
 }

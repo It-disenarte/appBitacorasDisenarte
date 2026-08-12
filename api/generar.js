@@ -1,9 +1,9 @@
-import { callGemini, GLOSARIO } from './_gemini.js';
+import { callGemini, GLOSARIO, leerBody } from './_gemini.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
   try {
-    const { area, fecha, entradas } = req.body || {};
+    const { area, fecha, entradas } = await leerBody(req);
     if (!entradas?.length) return res.status(400).json({ error: 'No hay entradas' });
 
     const prompt = `Eres el redactor de la bitácora diaria del área de ${area} en Diseñarte México, ${fecha}.

@@ -358,12 +358,15 @@ async function transcribir(e, blob) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ audio: b64, mime: blob.type || 'audio/webm' })
     });
-    if (!r.ok) throw new Error('http');
-    const { texto } = await r.json();
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Error del servidor');
+    const { texto } = j;
     if (!texto) throw new Error('vacío');
     e.contenido = texto; e.transcripcionRaw = texto; e.estado = 'listo';
-  } catch {
+  } catch (err) {
     e.estado = 'error';
+    e.errorIA = String(err.message || err);
+    console.warn('Error de transcripción:', err.message || err);
   }
   save(); if (vista === 'hoy') render();
 }
@@ -403,23 +406,25 @@ async function generar(d) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ area: S.area.nombre, fecha: d.fecha, entradas })
     });
-    if (!r.ok) throw new Error('http');
     const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Error del servidor');
     d.bitacora = {
       actividades: (j.actividades || []).map(a => ({ id: uid(), titulo: a.titulo || '', descripcion: a.descripcion || '', entradasRef: a.entradas_ref || [] })),
       conclusion: j.conclusion || '',
       entidadesDetectadas: j.entidades_detectadas || [],
       generadoEn: new Date().toISOString()
     };
-  } catch {
+  } catch (err) {
     d.bitacora = {
       actividades: entradas.map(e => ({ id: uid(), titulo: e.texto.slice(0, 48), descripcion: e.texto, entradasRef: [e.id] })),
       conclusion: '',
       entidadesDetectadas: [],
       generadoEn: new Date().toISOString(),
-      sinIA: true
+      sinIA: true,
+      errorIA: String(err.message || err)
     };
     snack('No se pudo generar con IA. Se armó un borrador con tus entradas: edítalo antes de exportar.');
+    console.warn('Error de IA:', err.message || err);
   }
   save();
 }
@@ -456,6 +461,12 @@ function vistaBitacora() {
   izq.append(li);
 
   const der = el('<section class="pane-actividades"></section>');
+  if (d.bitacora.sinIA) {
+    const av = el(`<div class="aviso"><span class="ico">warning</span>
+      <div><strong>Borrador sin IA.</strong> Cada entrada quedó como una actividad tal cual.
+      <div class="aviso-detalle">${esc(d.bitacora.errorIA || 'El servicio no respondió.')}</div></div></div>`);
+    der.append(av);
+  }
   der.append(el('<div class="section-title" style="margin-top:0">Actividades</div>'));
   d.bitacora.actividades.forEach((a, i) => der.append(actCard(a, i, d)));
 

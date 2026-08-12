@@ -248,3 +248,8 @@ button,input,textarea{font:inherit;color:inherit}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}
 }
+
+.aviso{display:flex;gap:12px;background:var(--error-container);color:#410E0B;border-radius:var(--sh-m);padding:14px 16px;margin-bottom:16px;font-size:14px;line-height:1.5}
+[data-theme="dark"] .aviso{color:#FFDAD6}
+.aviso .ico{font-size:20px;flex:0 0 auto}
+.aviso-detalle{font-size:12px;opacity:.8;margin-top:4px;word-break:break-word}

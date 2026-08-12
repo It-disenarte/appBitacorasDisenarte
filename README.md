@@ -34,10 +34,11 @@ icons/                iconos placeholder — reemplázalos por el logo real
 ## Qué falta respecto al spec
 
 - **Supabase**: hoy los datos viven en el dispositivo (localStorage + IndexedDB para el audio). Falta Auth, tablas y RLS por área para que dos personas capturen en el mismo día compartido.
-- **Cierre automático** corre en el cliente mientras la app esté abierta; el cron real es una Edge Function de Supabase.
 - **Logo**: pon `logo-color.png` en `/icons/` y reemplaza los iconos generados. El encabezado del PDF usa texto hasta que exista el logo.
 - **Creato Display / Walkway**: se usa Outfit como sustituto hasta tener las licencias.
 
 ## Atajos (escritorio)
 
 `Espacio` grabar / detener · `Esc` cancelar grabación · `Ctrl+S` guardar edición
+
+La grabación es de un toque: se abre la grabadora, se detiene con **Detener y guardar** o se descarta con la **X**.

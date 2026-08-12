@@ -10,7 +10,7 @@ const hoyISO = (d = new Date()) => {
 
 /* ---------------- estado ---------------- */
 const defaults = {
-  area: { id: 'produccion', nombre: 'Producción', horaCierre: '18:00' },
+  area: { id: 'produccion', nombre: 'Producción' },
   usuario: { id: 'u1', nombre: 'Tú' },
   tema: 'auto',
   dias: {}
@@ -138,9 +138,13 @@ function topbar(titulo, sub, estado, extra = '') {
 function vistaHoy() {
   const d = dia(fechaVista);
   const abierto = d.estado === 'abierto';
+  const sinEntradas = !d.entradas.length;
   const bar = topbar(S.area.nombre, fechaCorta(d.fecha), d.estado,
-    abierto ? `<button class="iconbtn" id="cerrar-dia" title="Cerrar día" aria-label="Cerrar día"><span class="ico">event_available</span></button>` : '');
-  bar.querySelector('#cerrar-dia')?.addEventListener('click', confirmarCierre);
+    abierto ? `<button class="iconbtn" id="cerrar-dia" ${sinEntradas ? 'disabled' : ''} title="${sinEntradas ? 'Captura al menos una entrada para cerrar el día' : 'Cerrar día'}" aria-label="Cerrar día"><span class="ico">event_available</span></button>` : '');
+  bar.querySelector('#cerrar-dia')?.addEventListener('click', () => {
+    if (sinEntradas) return snack('Captura al menos una entrada para cerrar el día.');
+    confirmarCierre();
+  });
 
   const page = el(`<div class="page"></div>`);
 
@@ -156,14 +160,13 @@ function vistaHoy() {
   const nodes = [bar, page];
 
   if (abierto) {
-    const dock = el(`<div class="capture-dock"><div class="capture-col">
-      <div class="capture-hint">Mantén presionado para dictar · toca para escribir</div>
-      <button class="fab" id="fab" aria-label="Mantén presionado para dictar, toca para escribir">
-        <span class="ico">mic</span><span>Capturar</span>
-      </button>
+    const dock = el(`<div class="capture-dock"><div class="capture-row">
+      <button class="fab-sec" id="fab-texto" aria-label="Escribir entrada"><span class="ico">keyboard</span></button>
+      <button class="fab" id="fab" aria-label="Grabar nota de voz"><span class="ico">mic</span><span>Grabar</span></button>
     </div></div>`);
+    dock.querySelector('#fab').onclick = () => { if (!rec) iniciarGrabacion(); };
+    dock.querySelector('#fab-texto').onclick = abrirTexto;
     nodes.push(dock);
-    setTimeout(() => wireFab(dock.querySelector('#fab')), 0);
   } else {
     const dock = el(`<div class="capture-dock">
       <button class="fab" id="ver-bit"><span class="ico">description</span><span>Ver bitácora</span></button>
@@ -238,24 +241,12 @@ function editarEntrada(e, d) {
 }
 
 /* ---------------- captura ---------------- */
-let rec = null, chunks = [], recStart = 0, recTimer = null, esLargo = false, holdTimer = null, stream = null, analyser = null, rafId = null;
+let rec = null, chunks = [], recStart = 0, recTimer = null, stream = null, analyser = null, rafId = null;
 
-function wireFab(fab) {
-  const start = (ev) => {
-    ev.preventDefault();
-    esLargo = false;
-    holdTimer = setTimeout(() => { esLargo = true; iniciarGrabacion(); }, 320);
-  };
-  const end = () => {
-    clearTimeout(holdTimer);
-    if (esLargo) detenerGrabacion(); else abrirTexto();
-    esLargo = false;
-  };
-  fab.addEventListener('pointerdown', start);
-  fab.addEventListener('pointerup', end);
-  fab.addEventListener('pointercancel', () => { clearTimeout(holdTimer); if (esLargo) cancelarGrabacion(); esLargo = false; });
-  fab.addEventListener('contextmenu', e => e.preventDefault());
-}
+/* Nada de menús contextuales ni lupa de selección al presionar la interfaz. */
+document.addEventListener('contextmenu', e => {
+  if (e.target.closest('button, .fab, .rec-overlay')) e.preventDefault();
+});
 
 function abrirTexto() {
   sheet(`<h2>Escribir entrada</h2>
@@ -285,7 +276,6 @@ async function iniciarGrabacion() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch {
-    esLargo = false;
     return snack('No se pudo usar el micrófono. Revisa los permisos o escribe la entrada.');
   }
   chunks = [];
@@ -295,11 +285,16 @@ async function iniciarGrabacion() {
   recStart = Date.now();
 
   recOverlay = el(`<div class="rec-overlay"><div class="rec-card">
+    <button class="rec-x" id="rec-cancel" aria-label="Cancelar grabación"><span class="ico">close</span></button>
     <div class="rec-wave">${'<span class="rec-bar"></span>'.repeat(13)}</div>
     <p class="rec-time">0:00</p>
-    <p class="rec-hint">Suelta para guardar</p>
+    <p class="rec-hint">Grabando…</p>
+    <button class="btn filled rec-stop" id="rec-stop"><span class="ico">stop</span>Detener y guardar</button>
   </div></div>`);
   document.body.append(recOverlay);
+  recOverlay.querySelector('#rec-stop').onclick = detenerGrabacion;
+  recOverlay.querySelector('#rec-cancel').onclick = cancelarGrabacion;
+  recOverlay.querySelector('#rec-stop').focus();
   const t = recOverlay.querySelector('.rec-time');
   recTimer = setInterval(() => {
     const s = Math.floor((Date.now() - recStart) / 1000);
@@ -343,7 +338,7 @@ function detenerGrabacion() {
   rec.onstop = async () => {
     const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
     limpiarGrabacion(); rec = null;
-    if (dur < 700) return snack('Grabación muy corta. Mantén presionado mientras hablas.');
+    if (dur < 700) return snack('Grabación muy corta. Habla antes de detenerla.');
     const e = agregarEntrada({ tipo: 'audio', estado: 'procesando' });
     await putAudio(e.id, blob);
     transcribir(e, blob);
@@ -380,6 +375,7 @@ const blobB64 = (blob) => new Promise(res => {
 /* ---------------- cierre y generación ---------------- */
 function confirmarCierre() {
   const d = dia(fechaVista);
+  if (!d.entradas.length) return snack('Captura al menos una entrada para cerrar el día.');
   sheet(`<h2>Cerrar el día</h2>
     <p style="font-size:14px;color:var(--on-surface-variant);line-height:1.5;margin:0">
       Se dejarán de aceptar entradas y se generará la bitácora con las ${d.entradas.length} entradas capturadas.</p>
@@ -477,24 +473,98 @@ function vistaBitacora() {
   };
   der.append(add);
 
-  const con = el(`<div class="conclusion">
-    <h3>Conclusión del día</h3>
-    <p class="txt" contenteditable="true" role="textbox" aria-label="Conclusión del día">${esc(d.bitacora.conclusion || 'Escribe aquí la conclusión del día.')}</p>
-  </div>`);
-  con.querySelector('.txt').addEventListener('blur', ev => { d.bitacora.conclusion = ev.target.textContent.trim(); save(); });
-  der.append(el('<div class="section-title">Cierre</div>'), con);
+  der.append(el('<div class="section-title">Cierre</div>'), bloqueCierre(d));
 
   const acciones = el(`<div class="btn-row">
     <button class="btn filled" id="exp"><span class="ico">picture_as_pdf</span>Exportar PDF</button>
     <button class="btn outlined" id="marcar">Marcar como listo</button>
+    <button class="btn text" id="reabrir"><span class="ico">lock_open</span>Reabrir día</button>
   </div>`);
   acciones.querySelector('#exp').onclick = () => exportar(d);
   acciones.querySelector('#marcar').onclick = () => { d.estado = 'listo'; d.revisadoEn = new Date().toISOString(); save(); render(); snack('Bitácora marcada como lista'); };
+  acciones.querySelector('#reabrir').onclick = () => confirmarReapertura(d);
   der.append(acciones);
 
   panes.append(izq, der);
   page.append(panes);
   return [bar, page];
+}
+
+function confirmarReapertura(d) {
+  sheet(`<h2>Reabrir el día</h2>
+    <p style="font-size:14px;color:var(--on-surface-variant);line-height:1.5;margin:0">
+      Se podrán agregar entradas otra vez. La bitácora que ya generaste se conserva:
+      para que incluya lo nuevo, vuelve a cerrar el día y regenera.</p>
+    <div class="sheet-actions"><button class="btn text" data-a="cancel">Cancelar</button><button class="btn filled" data-a="ok">Reabrir día</button></div>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('[data-a="ok"]').onclick = () => {
+        close();
+        d.estado = 'abierto'; d.cerradoEn = null; save();
+        nav('hoy', d.fecha);
+        snack('Día reabierto. Puedes seguir capturando.');
+      };
+    } });
+}
+
+function bloqueCierre(d) {
+  const hayConclusion = Boolean(d.bitacora.conclusion?.trim()) || d.bitacora.escribiendoCierre;
+  const hayActividades = d.bitacora.actividades.length > 0;
+
+  if (!hayConclusion) {
+    const vacio = el(`<div class="cierre-vacio">
+      <p>Esta bitácora no tiene conclusión.</p>
+      <div class="btn-row" style="margin-top:12px">
+        <button class="btn tonal" id="gen-cierre" ${hayActividades ? '' : 'disabled'}><span class="ico">auto_awesome</span>Generar cierre</button>
+        <button class="btn outlined" id="esc-cierre">Escribirlo yo</button>
+      </div>
+    </div>`);
+    vacio.querySelector('#gen-cierre').onclick = async (ev) => {
+      if (!hayActividades) return;
+      const b = ev.currentTarget;
+      b.disabled = true; b.lastChild.textContent = 'Generando…';
+      await generarCierre(d);
+      render();
+    };
+    vacio.querySelector('#esc-cierre').onclick = () => {
+      d.bitacora.escribiendoCierre = true; d.bitacora.conclusion = ''; save(); render();
+      setTimeout(() => {
+        const t = document.querySelector('.conclusion .txt');
+        if (t) { t.focus(); getSelection().collapse(t, 0); }
+      }, 0);
+    };
+    return vacio;
+  }
+
+  const con = el(`<div class="conclusion">
+    <div class="conclusion-head">
+      <h3>Conclusión del día</h3>
+      <button class="mini conclusion-del" aria-label="Eliminar conclusión"><span class="ico">delete</span></button>
+    </div>
+    <p class="txt" contenteditable="true" role="textbox" data-placeholder="Escribe aquí la conclusión del día" aria-label="Conclusión del día">${esc(d.bitacora.conclusion || '')}</p>
+  </div>`);
+  con.querySelector('.txt').addEventListener('blur', ev => { if (!ev.target.isConnected) return; d.bitacora.conclusion = ev.target.textContent.trim(); save(); });
+  con.querySelector('.conclusion-del').onclick = () => {
+    d.bitacora.conclusion = ''; d.bitacora.escribiendoCierre = false; save(); render(); snack('Conclusión eliminada');
+  };
+  return con;
+}
+
+async function generarCierre(d) {
+  try {
+    const r = await fetch('/api/cierre', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ area: S.area.nombre, fecha: d.fecha, actividades: d.bitacora.actividades })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Error del servidor');
+    if (!j.conclusion) throw new Error('La IA no devolvió conclusión.');
+    d.bitacora.conclusion = j.conclusion;
+    save(); snack('Cierre generado');
+  } catch (err) {
+    snack('No se pudo generar el cierre. Escríbelo a mano.');
+    console.warn('Error de cierre:', err.message || err);
+  }
 }
 
 function actCard(a, i, d) {
@@ -511,8 +581,8 @@ function actCard(a, i, d) {
     <p class="act-desc" contenteditable="true" role="textbox" aria-label="Descripción de la actividad ${i + 1}">${esc(a.descripcion)}</p>
   </article>`);
 
-  c.querySelector('.act-titulo').addEventListener('blur', e => { a.titulo = e.target.textContent.trim(); save(); });
-  c.querySelector('.act-desc').addEventListener('blur', e => { a.descripcion = e.target.textContent.trim(); save(); });
+  c.querySelector('.act-titulo').addEventListener('blur', e => { if (!e.target.isConnected) return; a.titulo = e.target.textContent.trim(); save(); });
+  c.querySelector('.act-desc').addEventListener('blur', e => { if (!e.target.isConnected) return; a.descripcion = e.target.textContent.trim(); save(); });
 
   const arr = d.bitacora.actividades;
   const mover = (n) => { const j = i + n; if (j < 0 || j >= arr.length) return; [arr[i], arr[j]] = [arr[j], arr[i]]; save(); render(); };
@@ -581,9 +651,6 @@ function vistaPerfil() {
     <div class="card">
       <div class="row"><div class="grow"><div class="row-label">Nombre del área</div></div>
         <input class="input" id="area" value="${esc(S.area.nombre)}"></div>
-      <div class="row"><div class="grow"><div class="row-label">Cierre automático</div>
-        <div class="row-sub">La bitácora se genera sola a esta hora</div></div>
-        <input class="input" id="hora" type="time" value="${esc(S.area.horaCierre)}"></div>
     </div>
     <div class="section-title">Tu cuenta</div>
     <div class="card">
@@ -608,7 +675,6 @@ function vistaPerfil() {
   </div>`);
 
   page.querySelector('#area').onchange = e => { S.area.nombre = e.target.value.trim() || 'Área'; save(); render(); };
-  page.querySelector('#hora').onchange = e => { S.area.horaCierre = e.target.value; save(); snack('Hora de cierre guardada'); };
   page.querySelector('#nombre').onchange = e => { S.usuario.nombre = e.target.value.trim() || 'Tú'; save(); };
   page.querySelectorAll('#tema [data-t]').forEach(b => b.onclick = () => { S.tema = b.dataset.t; save(); aplicarTema(); render(); });
   return [bar, page];
@@ -706,21 +772,12 @@ async function exportar(d) {
     } });
 }
 
-/* ---------------- cierre automático ---------------- */
-function revisarCierreAutomatico() {
-  const d = dia(hoyISO());
-  if (d.estado !== 'abierto') return;
-  const [h, m] = (S.area.horaCierre || '18:00').split(':').map(Number);
-  const ahora = new Date();
-  if (ahora.getHours() * 60 + ahora.getMinutes() >= h * 60 + m) cerrarDia(d);
-}
-
 /* ---------------- atajos de teclado ---------------- */
 document.addEventListener('keydown', e => {
   const enCampo = /input|textarea/i.test(e.target.tagName) || e.target.isContentEditable;
   if (e.code === 'Space' && !enCampo && vista === 'hoy' && dia(fechaVista).estado === 'abierto') {
     e.preventDefault();
-    if (!rec) { esLargo = true; iniciarGrabacion(); } else detenerGrabacion();
+    if (!rec) iniciarGrabacion(); else detenerGrabacion();
   }
   if (e.key === 'Escape' && rec) cancelarGrabacion();
   if (e.key.toLowerCase() === 's' && (e.metaKey || e.ctrlKey) && e.target.isContentEditable) { e.preventDefault(); e.target.blur(); snack('Guardado'); }
@@ -730,8 +787,6 @@ document.addEventListener('keydown', e => {
 aplicarTema();
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (S.tema === 'auto') { aplicarTema(); } });
 nav('hoy');
-revisarCierreAutomatico();
-setInterval(revisarCierreAutomatico, 60000);
 
 window.addEventListener('scroll', () => {
   document.querySelector('.topbar')?.classList.toggle('scrolled', window.scrollY > 4);

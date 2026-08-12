@@ -15,9 +15,11 @@ Agrúpalas: varias entradas de distintas horas sobre el mismo asunto son UNA sol
 
 Reglas:
 - Redacta en tercera persona y en voz del área, nunca de personas ("se atendieron 4 órdenes de corte", nunca "Juan hizo").
-- No evalúes, no califiques, no sugieras mejoras. Solo redacta lo que pasó.
+- **Ninguna entrada se queda fuera.** Toda entrada debe quedar reflejada en alguna actividad, aunque no sea trabajo de producción: incidencias, fallas de equipo, accidentes, retrasos, visitas, faltas de material o conflictos entre personal se registran igual que lo demás.
+- Las incidencias se registran tal como se reportaron, sin suavizarlas ni omitirlas. Si el reporte menciona a una persona por nombre en una incidencia, consérvalo.
+- No evalúes, no califiques, no sugieras mejoras, no asignes culpas. Solo redacta lo que pasó.
 - Título breve (máx. 8 palabras). Descripción de 1 a 3 oraciones.
-- La conclusión resume el día en 2 o 3 oraciones.
+- La conclusión resume el día en 2 o 3 oraciones e incluye las incidencias relevantes.
 - entradas_ref lleva los id de las entradas que originaron cada actividad.
 - No inventes nada que no esté en las entradas.
 

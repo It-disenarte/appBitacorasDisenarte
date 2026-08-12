@@ -273,3 +273,14 @@ button,.fab,.fab-sec,.nav-dest,.rail-item,.mini,.dia-row,.audio-pill,.list-opt{
 .cierre-vacio .btn-row{justify-content:center}
 
 .conclusion .txt:empty::before{content:attr(data-placeholder);opacity:.6}
+
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--outline-variant);margin-bottom:8px}
+.tabs button{flex:1;min-height:48px;border:0;background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--on-surface-variant);border-bottom:3px solid transparent}
+.tabs button[aria-selected="true"]{color:var(--primary);border-bottom-color:var(--primary)}
+.semana{background:var(--surface-container);border-radius:var(--sh-m);padding:16px;box-shadow:var(--e1);margin-bottom:12px}
+.semana-head{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.semana-head>div{flex:1;min-width:200px}
+.semana-rango{font-size:16px;font-weight:600}
+.semana-dias{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.semana-dia{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 14px;border-radius:var(--sh-full);border:1px solid var(--outline-variant);background:none;cursor:pointer;font-size:13px;color:var(--on-surface)}
+.semana-dia-n{display:grid;place-items:center;min-width:22px;height:22px;border-radius:var(--sh-full);background:var(--primary-container);color:var(--on-primary-container);font-size:11px;font-weight:600}

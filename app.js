@@ -77,6 +77,22 @@ function fechaCorta(iso) {
 }
 const horaAhora = () => new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false });
 
+function lunesDe(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+  return hoyISO(dt);
+}
+function rangoSemana(lunes) {
+  const [y, m, d] = lunes.split('-').map(Number);
+  const ini = new Date(y, m - 1, d);
+  const fin = new Date(y, m - 1, d + 6);
+  const mismoMes = ini.getMonth() === fin.getMonth();
+  return mismoMes
+    ? `${ini.getDate()} – ${fin.getDate()} de ${MESES[fin.getMonth()]} de ${fin.getFullYear()}`
+    : `${ini.getDate()} de ${MESES[ini.getMonth()]} – ${fin.getDate()} de ${MESES[fin.getMonth()]} de ${fin.getFullYear()}`;
+}
+
 function snack(msg) {
   const s = el(`<div class="snackbar">${esc(msg)}</div>`);
   $('#snackbar-root').append(s);
@@ -100,6 +116,7 @@ function sheet(html, { onMount } = {}) {
 /* ---------------- router ---------------- */
 let vista = 'hoy';
 let fechaVista = hoyISO();
+let tabHistorial = 'dias';
 
 function nav(v, fecha) {
   vista = v;
@@ -650,16 +667,71 @@ function actCard(a, i, d) {
 function vistaHistorial() {
   const bar = topbar('Historial', S.area.nombre);
   const page = el('<div class="page"></div>');
+  const tabs = el(`<div class="tabs" role="tablist">
+    <button role="tab" data-tab="dias" aria-selected="${tabHistorial === 'dias'}">Por día</button>
+    <button role="tab" data-tab="semanas" aria-selected="${tabHistorial === 'semanas'}">Por semana</button>
+  </div>`);
+  tabs.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tabHistorial = b.dataset.tab; render(); });
+  page.append(tabs);
+  page.append(tabHistorial === 'dias' ? historialDias() : historialSemanas());
+  return [bar, page];
+}
+
+const diasCerrados = () => Object.values(S.dias)
+  .filter(d => d.estado !== 'abierto')
+  .sort((a, b) => b.fecha.localeCompare(a.fecha));
+
+function historialSemanas() {
+  const cont = el('<div></div>');
+  const porSemana = new Map();
+  diasCerrados().forEach(d => {
+    const k = lunesDe(d.fecha);
+    if (!porSemana.has(k)) porSemana.set(k, []);
+    porSemana.get(k).push(d);
+  });
+
+  if (!porSemana.size) {
+    cont.append(el(`<div class="empty"><span class="ico">calendar_view_week</span>
+      <p>Aún no hay semanas con bitácoras. Aparecerán aquí conforme cierres los días.</p></div>`));
+    return cont;
+  }
+
+  [...porSemana.keys()].sort((a, b) => b.localeCompare(a)).forEach(lunes => {
+    const dias = porSemana.get(lunes).slice().sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const conBitacora = dias.filter(d => d.bitacora?.actividades.length);
+    const acts = conBitacora.reduce((n, d) => n + d.bitacora.actividades.length, 0);
+    const card = el(`<div class="semana">
+      <div class="semana-head">
+        <div>
+          <div class="semana-rango">${esc(rangoSemana(lunes))}</div>
+          <div class="dia-meta">${dias.length} día${dias.length === 1 ? '' : 's'} · ${acts} actividad${acts === 1 ? '' : 'es'}</div>
+        </div>
+        <button class="btn filled semana-pdf" ${conBitacora.length ? '' : 'disabled'}><span class="ico">picture_as_pdf</span>PDF de la semana</button>
+      </div>
+      <div class="semana-dias"></div>
+    </div>`);
+    card.querySelector('.semana-pdf').onclick = () => exportarSemana(lunes, conBitacora);
+    const lista = card.querySelector('.semana-dias');
+    dias.forEach(d => {
+      const n = d.bitacora?.actividades.length || 0;
+      const chip = el(`<button class="semana-dia"><span>${esc(fechaCorta(d.fecha).split(' ').slice(0, 2).join(' '))}</span><span class="semana-dia-n">${n}</span></button>`);
+      chip.onclick = () => nav('bitacora', d.fecha);
+      lista.append(chip);
+    });
+    cont.append(card);
+  });
+  return cont;
+}
+
+function historialDias() {
+  const wrap = el('<div></div>');
   const buscador = el(`<div class="search"><span class="ico">search</span><input id="q" placeholder="Buscar en las bitácoras" aria-label="Buscar"></div>`);
   const cont = el('<div id="lista-dias"></div>');
-  page.append(buscador, cont);
+  wrap.append(buscador, cont);
 
   const pintar = (q = '') => {
     cont.innerHTML = '';
-    const dias = Object.values(S.dias)
-      .filter(d => d.fecha !== hoyISO() || d.estado !== 'abierto')
-      .filter(d => !q || JSON.stringify(d).toLowerCase().includes(q.toLowerCase()))
-      .sort((a, b) => b.fecha.localeCompare(a.fecha));
+    const dias = diasCerrados().filter(d => !q || JSON.stringify(d).toLowerCase().includes(q.toLowerCase()));
     if (!dias.length) {
       cont.append(el(`<div class="empty"><span class="ico">history</span><p>Todavía no hay días cerrados. Aparecerán aquí al cerrar el primero.</p></div>`));
       return;
@@ -683,7 +755,7 @@ function vistaHistorial() {
   };
   pintar();
   buscador.querySelector('#q').addEventListener('input', e => pintar(e.target.value));
-  return [bar, page];
+  return wrap;
 }
 
 /* ---------------- pantalla: Perfil ---------------- */
@@ -730,32 +802,49 @@ function aplicarTema() {
 }
 
 /* ---------------- PDF ---------------- */
-function nombreArchivo(d) {
-  const area = S.area.nombre.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '');
-  return `Bitacora_${area}_${d.fecha}.pdf`;
-}
+const slug = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '');
+const nombreArchivo = (d) => `Bitacora_${slug(S.area.nombre)}_${d.fecha}.pdf`;
+const nombreArchivoSemana = (lunes) => `Bitacora_${slug(S.area.nombre)}_Semana_${lunes}.pdf`;
 
-async function construirPDF(d) {
+function docNuevo() {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
-  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
-  const M = 56; let y = M;
+  doc.setFillColor(165, 54, 146);
+  doc.rect(0, 0, doc.internal.pageSize.getWidth(), 8, 'F');
+  return doc;
+}
 
-  const nueva = () => { doc.addPage(); y = M; };
-  const espacio = (n) => { if (y + n > H - 70) nueva(); };
-
-  doc.setFillColor(165, 54, 146); doc.rect(0, 0, W, 8, 'F');
-  y = M + 6;
+function encabezado(doc, titulo, sub) {
+  const W = doc.internal.pageSize.getWidth(), M = 56;
+  let y = M + 6;
   doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor(29, 27, 30);
-  doc.text('Bitácora diaria', M, y);
-  y += 22;
+  doc.text(titulo, M, y); y += 22;
   doc.setFont('helvetica', 'normal'); doc.setFontSize(12); doc.setTextColor(74, 69, 78);
-  doc.text(`${S.area.nombre} · ${fechaLarga(d.fecha)}`, M, y);
-  y += 12;
+  doc.text(sub, M, y); y += 12;
   doc.setDrawColor(221, 214, 219); doc.line(M, y, W - M, y);
-  y += 30;
+  return y + 30;
+}
 
-  (d.bitacora?.actividades || []).forEach((a, i) => {
+/* Dibuja las actividades y la conclusión de un día. Devuelve la nueva y. */
+function pintarDia(doc, d, y, { subtitulo } = {}) {
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), M = 56;
+  const espacio = (n) => { if (y + n > H - 70) { doc.addPage(); y = M; } };
+
+  if (subtitulo) {
+    espacio(46);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(123, 7, 166);
+    doc.text(subtitulo, M, y); y += 8;
+    doc.setDrawColor(240, 220, 236); doc.line(M, y, W - M, y); y += 22;
+  }
+
+  const acts = d.bitacora?.actividades || [];
+  if (!acts.length) {
+    espacio(30);
+    doc.setFont('helvetica', 'italic'); doc.setFontSize(11); doc.setTextColor(120, 115, 123);
+    doc.text('Sin actividades registradas.', M, y); y += 26;
+  }
+
+  acts.forEach((a, i) => {
     espacio(70);
     doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(29, 27, 30);
     const t = doc.splitTextToSize(`${i + 1}. ${a.titulo}`, W - M * 2);
@@ -767,40 +856,74 @@ async function construirPDF(d) {
   });
 
   if (d.bitacora?.conclusion) {
-    espacio(110);
     const p = doc.splitTextToSize(d.bitacora.conclusion, W - M * 2 - 34);
     const h = p.length * 14 + 44;
+    espacio(h + 10);
     doc.setFillColor(251, 217, 242); doc.rect(M, y, W - M * 2, h, 'F');
     doc.setFillColor(165, 54, 146); doc.rect(M, y, 5, h, 'F');
     doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(123, 7, 166);
-    doc.text('CONCLUSIÓN DEL DÍA', M + 18, y + 20);
+    doc.text(subtitulo ? 'CIERRE DEL DÍA' : 'CONCLUSIÓN DEL DÍA', M + 18, y + 20);
     doc.setFont('helvetica', 'normal'); doc.setFontSize(11); doc.setTextColor(45, 20, 45);
     doc.text(p, M + 18, y + 38);
     y += h + 24;
   }
+  return y;
+}
 
-  const capturaron = [...new Set(d.entradas.map(e => e.usuarioNombre))].join(', ') || '—';
+function pieDePagina(doc, linea) {
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), M = 56;
   const pags = doc.internal.getNumberOfPages();
   for (let i = 1; i <= pags; i++) {
     doc.setPage(i);
     doc.setDrawColor(221, 214, 219); doc.line(M, H - 58, W - M, H - 58);
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(120, 115, 123);
-    doc.text(`Capturaron: ${capturaron} · ${d.entradas.length} entradas`, M, H - 42);
+    doc.text(linea, M, H - 42);
     doc.text('Diseñarte México', M, H - 30);
     doc.text(`${i} / ${pags}`, W - M, H - 30, { align: 'right' });
   }
+}
+
+async function construirPDF(d) {
+  const doc = docNuevo();
+  let y = encabezado(doc, 'Bitácora diaria', `${S.area.nombre} · ${fechaLarga(d.fecha)}`);
+  pintarDia(doc, d, y);
+  const capturaron = [...new Set(d.entradas.map(e => e.usuarioNombre))].join(', ') || '—';
+  pieDePagina(doc, `Capturaron: ${capturaron} · ${d.entradas.length} entradas`);
+  return doc;
+}
+
+async function construirPDFSemana(lunes, dias) {
+  const doc = docNuevo();
+  let y = encabezado(doc, 'Bitácora semanal', `${S.area.nombre} · ${rangoSemana(lunes)}`);
+  dias.forEach((d, i) => {
+    if (i) { doc.addPage(); y = 56; }
+    y = pintarDia(doc, d, y, { subtitulo: fechaCorta(d.fecha) });
+  });
+  const todas = dias.flatMap(d => d.entradas);
+  const capturaron = [...new Set(todas.map(e => e.usuarioNombre))].join(', ') || '—';
+  pieDePagina(doc, `${dias.length} días · ${todas.length} entradas · Capturaron: ${capturaron}`);
   return doc;
 }
 
 async function exportar(d) {
   if (!window.jspdf) return snack('El generador de PDF aún está cargando. Intenta de nuevo.');
   const doc = await construirPDF(d);
-  const nombre = nombreArchivo(d);
+  ofrecerPDF(doc, nombreArchivo(d), 'Exportar bitácora');
+}
+
+async function exportarSemana(lunes, dias) {
+  if (!window.jspdf) return snack('El generador de PDF aún está cargando. Intenta de nuevo.');
+  if (!dias.length) return snack('Esa semana no tiene bitácoras generadas.');
+  const doc = await construirPDFSemana(lunes, dias);
+  ofrecerPDF(doc, nombreArchivoSemana(lunes), 'Exportar semana');
+}
+
+function ofrecerPDF(doc, nombre, titulo) {
   const blob = doc.output('blob');
   const file = new File([blob], nombre, { type: 'application/pdf' });
   const puedeCompartir = navigator.canShare?.({ files: [file] });
 
-  sheet(`<h2>Exportar bitácora</h2>
+  sheet(`<h2>${esc(titulo)}</h2>
     <p style="font-size:14px;color:var(--on-surface-variant);margin:0 0 12px">${esc(nombre)}</p>
     <button class="list-opt" data-a="desc"><span class="ico">download</span>Descargar</button>
     ${puedeCompartir ? '<button class="list-opt" data-a="share"><span class="ico">share</span>Compartir</button>' : ''}

@@ -42,6 +42,10 @@ export async function callGemini(parts, { json = false } = {}) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ role: 'user', parts }],
+            safetySettings: [
+              'HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH',
+              'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT'
+            ].map(category => ({ category, threshold: 'BLOCK_NONE' })),
             generationConfig: json
               ? { responseMimeType: 'application/json', temperature: 0.3 }
               : { temperature: 0.2 }

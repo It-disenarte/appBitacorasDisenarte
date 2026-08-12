@@ -189,6 +189,7 @@ function entradaCard(e, d) {
       <p class="entrada-texto ${e.estado !== 'listo' ? 'pendiente' : ''}">${esc(
         e.estado === 'procesando' ? 'Transcribiendo…' :
         e.estado === 'error' ? 'No se pudo transcribir. El audio está guardado.' : e.contenido)}</p>
+      ${e.estado === 'error' && e.errorIA ? `<div class="aviso-detalle">${esc(e.errorIA)}</div>` : ''}
     </div>
     <div class="entrada-acciones">
       ${e.tipo === 'audio' ? '<button class="mini" data-act="play" aria-label="Reproducir audio"><span class="ico">play_arrow</span></button>' : ''}
@@ -197,9 +198,18 @@ function entradaCard(e, d) {
   </article>`);
 
   if (e.estado === 'error') {
-    const b = el('<button class="reintentar">Reintentar o escribir el texto</button>');
-    b.onclick = () => editarEntrada(e, d);
-    c.querySelector('.entrada-body').append(b);
+    const fila = el('<div class="btn-row" style="margin-top:8px;gap:6px"></div>');
+    const rb = el('<button class="reintentar">Reintentar</button>');
+    rb.onclick = async () => {
+      const audio = await getAudio(e.id);
+      if (!audio) return snack('El audio no está en este dispositivo. Escribe el texto.');
+      e.estado = 'procesando'; e.errorIA = ''; save(); render();
+      transcribir(e, audio);
+    };
+    const eb = el('<button class="reintentar" style="color:var(--primary)">Escribir el texto</button>');
+    eb.onclick = () => editarEntrada(e, d);
+    fila.append(rb, eb);
+    c.querySelector('.entrada-body').append(fila);
   }
   c.querySelector('[data-act="play"]')?.addEventListener('click', () => reproducir(e.id));
   c.querySelector('[data-act="menu"]').onclick = () => menuEntrada(e, d);
@@ -346,12 +356,45 @@ function detenerGrabacion() {
   rec.stop();
 }
 
+/* Gemini no acepta el contenedor webm de MediaRecorder.
+   Convertimos a WAV mono 16 kHz en el dispositivo: formato aceptado y mucho más ligero. */
+async function aWav(blob) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+  const rate = 16000;
+  const off = new OfflineAudioContext(1, Math.ceil(buf.duration * rate), rate);
+  const src = off.createBufferSource();
+  src.buffer = buf; src.connect(off.destination); src.start();
+  const rendered = await off.startRendering();
+  ctx.close();
+
+  const pcm = rendered.getChannelData(0);
+  const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const txt = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+  txt(0, 'RIFF'); out.setUint32(4, 36 + pcm.length * 2, true); txt(8, 'WAVEfmt ');
+  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
+  out.setUint32(24, rate, true); out.setUint32(28, rate * 2, true);
+  out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+  txt(36, 'data'); out.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) {
+    const s = Math.max(-1, Math.min(1, pcm[i]));
+    out.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([out.buffer], { type: 'audio/wav' });
+}
+
 async function transcribir(e, blob) {
   try {
-    const b64 = await blobB64(blob);
+    let envio = blob, mime = (blob.type || '').split(';')[0] || 'audio/webm';
+    try { envio = await aWav(blob); mime = 'audio/wav'; }
+    catch (err) { console.warn('No se pudo convertir a WAV, se envía el original:', err.message || err); }
+
+    if (envio.size > 3.8 * 1024 * 1024) throw new Error('La nota es demasiado larga para transcribirla de una vez. Grábala en partes más cortas.');
+
+    const b64 = await blobB64(envio);
     const r = await fetch('/api/transcribir', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audio: b64, mime: blob.type || 'audio/webm' })
+      body: JSON.stringify({ audio: b64, mime })
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Error del servidor');

@@ -21,21 +21,21 @@ Sin la key, la app funciona igual: la transcripción marca error (el audio se co
 
 ```
 index.html            shell
-styles.css            tema MD3 con seed #A53692, claro y oscuro
+styles.css            tema según el manual de marca (#7C07A6, #A53692, #5CC6D0, #96989A), claro y oscuro
 app.js                toda la app (router, captura, edición, PDF)
 api/transcribir.js    audio → texto (Gemini)
 api/generar.js        entradas del día → actividades + conclusión (JSON estricto)
 api/_gemini.js        cliente + glosario del negocio
 sw.js                 service worker, funciona offline
 manifest.webmanifest  instalable
-icons/                iconos placeholder — reemplázalos por el logo real
+icons/                icono de la app (icon.svg es el original; los PNG salen de él)
 ```
 
 ## Qué falta respecto al spec
 
 - **Supabase**: hoy los datos viven en el dispositivo (localStorage + IndexedDB para el audio). Falta Auth, tablas y RLS por área para que dos personas capturen en el mismo día compartido.
-- **Logo**: pon `logo-color.png` en `/icons/` y reemplaza los iconos generados. El encabezado del PDF usa texto hasta que exista el logo.
-- **Creato Display / Walkway**: se usa Outfit como sustituto hasta tener las licencias.
+- **Logo en PDF**: el encabezado del PDF usa texto; el icono de la app ya está en `/icons/`.
+- **Creato Display / Walkway**: se usan Poppins (títulos) y Montserrat (texto), las mismas del manual de marca, hasta tener las licencias.
 
 ## Atajos (escritorio)
 

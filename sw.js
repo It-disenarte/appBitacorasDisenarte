@@ -1,4 +1,4 @@
-const CACHE = 'bitacora-v1';
+const CACHE = 'bitacora-v2';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {

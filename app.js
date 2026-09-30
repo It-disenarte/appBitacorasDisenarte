@@ -798,7 +798,7 @@ function vistaPerfil() {
 function aplicarTema() {
   const dark = S.tema === 'dark' || (S.tema === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  document.querySelector('meta[name="theme-color"]').content = dark ? '#151217' : '#A53692';
+  document.querySelector('meta[name="theme-color"]').content = dark ? '#151217' : '#7C07A6';
 }
 
 /* ---------------- PDF ---------------- */
@@ -809,7 +809,7 @@ const nombreArchivoSemana = (lunes) => `Bitacora_${slug(S.area.nombre)}_Semana_$
 function docNuevo() {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
-  doc.setFillColor(165, 54, 146);
+  doc.setFillColor(124, 7, 166);
   doc.rect(0, 0, doc.internal.pageSize.getWidth(), 8, 'F');
   return doc;
 }
@@ -834,7 +834,7 @@ function pintarDia(doc, d, y, { subtitulo } = {}) {
     espacio(46);
     doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(123, 7, 166);
     doc.text(subtitulo, M, y); y += 8;
-    doc.setDrawColor(240, 220, 236); doc.line(M, y, W - M, y); y += 22;
+    doc.setDrawColor(230, 205, 242); doc.line(M, y, W - M, y); y += 22;
   }
 
   const acts = d.bitacora?.actividades || [];
@@ -859,7 +859,7 @@ function pintarDia(doc, d, y, { subtitulo } = {}) {
     const p = doc.splitTextToSize(d.bitacora.conclusion, W - M * 2 - 34);
     const h = p.length * 14 + 44;
     espacio(h + 10);
-    doc.setFillColor(251, 217, 242); doc.rect(M, y, W - M * 2, h, 'F');
+    doc.setFillColor(241, 221, 249); doc.rect(M, y, W - M * 2, h, 'F');
     doc.setFillColor(165, 54, 146); doc.rect(M, y, 5, h, 'F');
     doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(123, 7, 166);
     doc.text(subtitulo ? 'CIERRE DEL DÍA' : 'CONCLUSIÓN DEL DÍA', M + 18, y + 20);

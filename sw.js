@@ -1,5 +1,11 @@
-const CACHE = 'bitacora-v2';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest'];
+const CACHE = 'bitacora-v3';
+const SHELL = [
+  './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
+  './favicon.ico', './icons/hoja.svg', './icons/hoja-blanca.svg', './icons/hoja-192.png',
+  './icons/hoja-512.png', './icons/hoja-512-maskable.png', './icons/hoja-apple-touch.png',
+  './img/textura.jpg',
+  './fonts/Poppins-Italic.ttf', './fonts/Poppins-Regular.ttf', './fonts/Poppins-SemiBold.ttf', './fonts/poppins-300-latin-ext.woff2', './fonts/poppins-300-latin.woff2', './fonts/poppins-400-latin-ext.woff2', './fonts/poppins-400-latin.woff2', './fonts/poppins-500-latin-ext.woff2', './fonts/poppins-500-latin.woff2', './fonts/poppins-600-latin-ext.woff2', './fonts/poppins-600-latin.woff2', './fonts/poppins-700-latin-ext.woff2', './fonts/poppins-700-latin.woff2', './fonts/poppins.css'
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

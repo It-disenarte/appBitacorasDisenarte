@@ -20,22 +20,23 @@ Sin la key, la app funciona igual: la transcripción marca error (el audio se co
 ## Archivos
 
 ```
-index.html            shell
-styles.css            tema según el manual de marca (#7C07A6, #A53692, #5CC6D0, #96989A), claro y oscuro
-app.js                toda la app (router, captura, edición, PDF)
+index.html            shell: menú lateral morado (escritorio) y barra superior + cajón (celular)
+styles.css            línea de diseño unificada de Diseñarte (estándar: Cotizador), solo tema claro
+app.js                toda la app (router, captura, edición, PDF, asistente de uso, pantalla de carga)
 api/transcribir.js    audio → texto (Gemini)
 api/generar.js        entradas del día → actividades + conclusión (JSON estricto)
 api/_gemini.js        cliente + glosario del negocio
-sw.js                 service worker, funciona offline
+sw.js                 service worker, funciona offline (sube CACHE al cambiar archivos)
 manifest.webmanifest  instalable
-icons/                icono de la app (icon.svg es el original; los PNG salen de él)
+fonts/                Poppins incluida (woff2 para la interfaz, TTF para el PDF)
+img/textura.jpg       textura de fondo del manual (al 7 %)
+icons/, favicon.ico   hoja morada con libreta; se generan con `node scripts/iconos.cjs`
 ```
 
 ## Qué falta respecto al spec
 
 - **Supabase**: hoy los datos viven en el dispositivo (localStorage + IndexedDB para el audio). Falta Auth, tablas y RLS por área para que dos personas capturen en el mismo día compartido.
-- **Logo en PDF**: el encabezado del PDF usa texto; el icono de la app ya está en `/icons/`.
-- **Creato Display / Walkway**: se usan Poppins (títulos) y Montserrat (texto), las mismas del manual de marca, hasta tener las licencias.
+- **Logo en PDF**: el encabezado del PDF usa texto y el filete de marca; el ícono de la app está en `/icons/`.
 
 ## Atajos (escritorio)
 

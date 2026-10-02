@@ -1,7 +1,9 @@
 import { callGemini, leerBody } from './_gemini.js';
+import { conSesion } from './_servidor.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
+  if (!(await conSesion(req, res))) return;
   try {
     const { area, fecha, actividades } = await leerBody(req);
     if (!actividades?.length) return res.status(400).json({ error: 'No hay actividades' });

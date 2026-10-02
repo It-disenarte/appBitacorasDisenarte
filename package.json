@@ -1,6 +1,16 @@
 {
   "name": "bitacora-disenarte",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node servidor.mjs",
+    "dev": "node servidor.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
 }

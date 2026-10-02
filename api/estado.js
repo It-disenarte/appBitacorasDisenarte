@@ -1,14 +1,27 @@
 /* Diagnóstico: abre /api/estado en el navegador para ver qué falta. */
+import { q } from './_servidor.js';
+
+async function baseDeDatos() {
+  if (!process.env.DATABASE_URL) return 'Falta DATABASE_URL.';
+  try {
+    const [{ version }] = await q('SELECT version()');
+    return `Conectada: ${version.split(',')[0]}`;
+  } catch (e) {
+    return `No conecta: ${e.message}`;
+  }
+}
+
 export default async function handler(req, res) {
   const key = process.env.GEMINI_API_KEY;
   const salida = {
+    baseDeDatos: await baseDeDatos(),
     tieneKey: Boolean(key),
     longitudKey: key ? key.length : 0,
     modeloConfigurado: process.env.GEMINI_MODEL || '(ninguno, se usa el automático)',
     runtime: process.version
   };
   if (!key) {
-    salida.diagnostico = 'Falta GEMINI_API_KEY. Vercel → Settings → Environment Variables → agrégala en Production, Preview y Development, y haz Redeploy.';
+    salida.diagnostico = 'Falta GEMINI_API_KEY. Agrégala en las variables de entorno y vuelve a desplegar.';
     return res.status(200).json(salida);
   }
   try {

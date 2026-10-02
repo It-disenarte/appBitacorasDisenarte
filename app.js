@@ -1,28 +1,184 @@
 /* Bitácora Diaria por Área — Diseñarte México
-   PWA sin build step. Datos locales (localStorage + IndexedDB);
-   IA vía funciones serverless en /api. */
+   PWA sin build step. Cada persona entra con su cuenta; sus bitácoras se guardan en
+   Postgres (vía /api/dias) y se copian en el dispositivo para funcionar sin conexión.
+   Los audios se quedan en el dispositivo (IndexedDB). IA vía funciones serverless en /api. */
 
-const KEY = 'bitacora.v1';
+const KEY_VIEJA = 'bitacora.v1';        // datos de antes de las cuentas, se pasan a la primera cuenta que entre
+const KEY_SESION = 'bitacora.sesion';   // último usuario, para abrir sin conexión
+const keyUsuario = (id) => `bitacora.u.${id}`;
+const PASSWORD_MIN = 8;
 const hoyISO = (d = new Date()) => {
   const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
   return z.toISOString().slice(0, 10);
 };
 
 /* ---------------- estado ---------------- */
-const defaults = {
-  area: { id: 'produccion', nombre: 'Producción' },
-  usuario: { id: 'u1', nombre: 'Tú' },
-  dias: {}
-};
-let S = load();
+let YO = null;   // usuario con la sesión abierta
+let S = { area: { nombre: '' }, usuario: { id: '', nombre: '' }, dias: {} };
+let pendientes = new Set();   // fechas con cambios sin subir al servidor
+let enServidor = new Set();   // fechas que ya existen en el servidor
+let firmas = {};              // fecha → JSON del día la última vez que se guardó
 
-function load() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(KEY));
-    return raw ? { ...defaults, ...raw } : structuredClone(defaults);
-  } catch { return structuredClone(defaults); }
+const firma = ({ actualizado, ...resto }) => JSON.stringify(resto);
+const diaVacio = (d) => d.estado === 'abierto' && !d.entradas.length && !d.bitacora;
+
+function cargarLocal() {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(keyUsuario(YO.id))); } catch {}
+  S = { area: { nombre: YO.area }, usuario: { id: YO.id, nombre: YO.nombre }, dias: raw?.dias || {} };
+  pendientes = new Set(raw?.pendientes || []);
+  enServidor = new Set(raw?.enServidor || []);
+  firmas = Object.fromEntries(Object.entries(S.dias).map(([f, d]) => [f, firma(d)]));
 }
-function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
+function guardarLocal() {
+  if (!YO) return;
+  try {
+    localStorage.setItem(keyUsuario(YO.id), JSON.stringify({ dias: S.dias, pendientes: [...pendientes], enServidor: [...enServidor] }));
+  } catch (e) { console.warn('No se pudo guardar en el dispositivo:', e.message || e); }
+}
+
+/* Guarda en el dispositivo y programa la subida de los días que cambiaron. */
+function save() {
+  for (const [f, d] of Object.entries(S.dias)) {
+    const j = firma(d);
+    if (firmas[f] === j) continue;
+    firmas[f] = j;
+    if (!enServidor.has(f) && diaVacio(d)) continue;   // un día vacío que nunca se subió no hace falta subirlo
+    d.actualizado = Date.now();
+    pendientes.add(f);
+  }
+  guardarLocal();
+  if (pendientes.size) programarSync();
+  pintarEstado();
+}
+
+/* ---------------- servidor ---------------- */
+const espera = (ms) => new Promise(r => setTimeout(r, ms));
+
+/* fetch con JSON. Lanza Error con el mensaje del servidor; e.offline si no hubo red. */
+async function api(url, metodo = 'GET', datos) {
+  let r;
+  try {
+    r = await fetch(url, {
+      method: metodo, credentials: 'same-origin',
+      headers: datos ? { 'Content-Type': 'application/json' } : {},
+      body: datos ? JSON.stringify(datos) : undefined
+    });
+  } catch {
+    const e = new Error('Sin conexión. Revisa tu internet e intenta de nuevo.'); e.offline = true; throw e;
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.error || `Error del servidor (${r.status}).`); e.status = r.status; throw e; }
+  return j;
+}
+
+/* Para las funciones de IA: si la sesión venció, vuelve al login. */
+async function apiIA(url, datos) {
+  try { return await api(url, 'POST', datos); }
+  catch (e) { if (e.status === 401) sesionVencida(); throw e; }
+}
+
+/* ---------------- sincronización ---------------- */
+let syncTimer = 0, sincronizando = null, estadoSync = 'ok', ultimaBajada = 0;
+
+function programarSync(ms = 1500) {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => sincronizar(), ms);
+}
+
+/* Un día del servidor reemplaza al local, salvo que el local tenga cambios más nuevos
+   o una transcripción en curso. */
+function aplicarDelServidor(s) {
+  const local = S.dias[s.fecha];
+  enServidor.add(s.fecha);
+  if (local && (local.actualizado || 0) === s.actualizado) { pendientes.delete(s.fecha); return false; }
+  if (local && pendientes.has(s.fecha) && (local.actualizado || 0) > s.actualizado) return false;
+  if (local?.entradas.some(e => e.estado === 'procesando')) { pendientes.add(s.fecha); return false; }
+  S.dias[s.fecha] = { ...s.datos, fecha: s.fecha, actualizado: s.actualizado };
+  firmas[s.fecha] = firma(S.dias[s.fecha]);
+  pendientes.delete(s.fecha);
+  return true;
+}
+
+/* Sube los días pendientes (y con bajar, primero descarga los de la cuenta).
+   Devuelve true si terminó sin errores. Con manual, lanza el error para mostrarlo. */
+function sincronizar({ bajar = false, manual = false } = {}) {
+  if (!YO) return Promise.resolve(false);
+  if (sincronizando) return manual || bajar ? sincronizando.then(() => sincronizar({ bajar, manual })) : sincronizando;
+  clearTimeout(syncTimer);
+  const yo = YO;
+  sincronizando = (async () => {
+    estadoSync = 'sincronizando'; pintarEstado();
+    let cambio = false;
+    try {
+      if (bajar) {
+        const { dias } = await api('/api/dias');
+        if (YO !== yo) return false;
+        dias.forEach(s => { if (aplicarDelServidor(s)) cambio = true; });
+        ultimaBajada = Date.now();
+        guardarLocal();
+      }
+      for (let vuelta = 0; pendientes.size && vuelta < 20; vuelta++) {
+        [...pendientes].filter(f => !S.dias[f]).forEach(f => pendientes.delete(f));
+        const lote = [...pendientes].slice(0, 20).map(f => ({ fecha: f, datos: S.dias[f], actualizado: S.dias[f].actualizado || Date.now() }));
+        if (!lote.length) break;
+        const r = await api('/api/dias', 'PUT', { dias: lote });
+        if (YO !== yo) return false;
+        lote.forEach(x => {
+          enServidor.add(x.fecha);
+          // Si se editó mientras se subía, se queda pendiente para la siguiente vuelta.
+          if ((S.dias[x.fecha]?.actualizado || 0) === x.actualizado) pendientes.delete(x.fecha);
+        });
+        r.masNuevos.forEach(s => { pendientes.delete(s.fecha); if (aplicarDelServidor(s)) cambio = true; });
+        guardarLocal();
+      }
+      estadoSync = 'ok';
+      return true;
+    } catch (e) {
+      if (e.status === 401) { sesionVencida(); return false; }
+      estadoSync = e.offline ? 'sin-conexion' : 'error';
+      console.warn('Sincronización:', e.message || e);
+      programarSync(30000);
+      if (manual) throw e;
+      return false;
+    } finally {
+      sincronizando = null;
+      pintarEstado();
+      if (cambio) refrescar();
+    }
+  })();
+  return sincronizando;
+}
+
+/* Vuelve a pintar con lo que llegó del servidor, sin interrumpir a quien está escribiendo. */
+let refrescoPendiente = false;
+function refrescar() {
+  const a = document.activeElement;
+  const escribiendo = a && (a.isContentEditable || /input|textarea/i.test(a.tagName)) && $('#main').contains(a);
+  if (escribiendo || $('.sheet') || rec) { refrescoPendiente = true; return; }
+  if (YO) render();
+}
+
+function pintarEstado() {
+  const caja = $('#pie-estado');
+  if (!caja || !YO) return;
+  const n = pendientes.size;
+  const [clase, txt] =
+    estadoSync === 'sincronizando' ? ['sincronizando', 'Sincronizando…'] :
+    estadoSync === 'sin-conexion' ? ['pendiente', n ? `Sin conexión · ${n} día${n === 1 ? '' : 's'} por subir` : 'Sin conexión'] :
+    estadoSync === 'error' ? ['error', 'No se pudo sincronizar'] :
+    n ? ['pendiente', 'Cambios por subir'] : ['ok', 'Sincronizado'];
+  caja.dataset.estado = clase;
+  $('#pie-estado-txt').textContent = txt;
+}
+
+addEventListener('online', () => { if (YO) sincronizar(); });
+document.addEventListener('visibilitychange', () => {
+  if (!YO) return;
+  // Al salir de la app se intenta subir lo pendiente; al volver, se baja lo capturado en otro dispositivo.
+  if (document.visibilityState === 'hidden' && pendientes.size) sincronizar();
+  if (document.visibilityState === 'visible' && Date.now() - ultimaBajada > 5 * 60000) sincronizar({ bajar: true });
+});
 
 function dia(fecha = hoyISO()) {
   if (!S.dias[fecha]) S.dias[fecha] = { fecha, estado: 'abierto', entradas: [], bitacora: null, revisado: false };
@@ -90,7 +246,13 @@ const ICONOS = {
   'download': '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/>',
   'share': '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98M15.41 6.51l-6.82 3.98"/>',
   'eye': '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
-  'loader': '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>'
+  'loader': '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+  'user-plus': '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>',
+  'user-x': '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 8 5 5M22 8l-5 5"/>',
+  'user-check': '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m16 11 2 2 4-4"/>',
+  'key': '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5"/>',
+  'copy': '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  'log-out': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>'
 };
 const ico = (n, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONOS[n]}</svg>`;
 const vacio = (texto) => `<div class="empty" data-guide="vacio"><img src="icons/hoja.svg" alt=""><p>${texto}</p></div>`;
@@ -158,8 +320,11 @@ let fechaVista = hoyISO();
 let tabHistorial = 'dias';
 
 function nav(v, fecha) {
+  if (v === 'usuarios' && YO?.rol !== 'admin') v = 'hoy';
   vista = v;
   if (fecha) fechaVista = fecha;
+  refrescoPendiente = false;
+  if (v === 'usuarios') { usuariosLista = null; cargarUsuarios(); }
   document.querySelectorAll('[data-nav]').forEach(b => {
     const on = b.dataset.nav === (v === 'bitacora' ? 'hoy' : v);
     on ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current');
@@ -169,7 +334,7 @@ function nav(v, fecha) {
   render();
   $('#main').scrollTo?.(0, 0);
   window.scrollTo(0, 0);
-  guiaAlEntrar();
+  if (v !== 'usuarios') guiaAlEntrar();   // la de Usuarios sale cuando termina de cargar la lista
 }
 document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => nav(b.dataset.nav, hoyISO()));
 
@@ -179,6 +344,7 @@ function render() {
   if (vista === 'hoy') m.append(...vistaHoy());
   else if (vista === 'bitacora') m.append(...vistaBitacora());
   else if (vista === 'historial') m.append(...vistaHistorial());
+  else if (vista === 'usuarios') m.append(...vistaUsuarios());
   else m.append(...vistaPerfil());
   m.classList.toggle('con-dock', Boolean(m.querySelector('.capture-dock')));
   pintarMenu();
@@ -237,12 +403,24 @@ $('#asistente-switch').onclick = () => {
 };
 $('#ver-guia').onclick = () => { cerrarMenu(); abrirGuia(); };
 $('#ayuda').onclick = () => abrirGuia();
+$('#cambiar-pass').onclick = () => { cerrarMenu(); cambiarPassword(); };
+$('#salir').onclick = () => salir();
+$('#sincronizar').onclick = async () => {
+  cerrarMenu();
+  const listo = cargando('Sincronizando…');
+  try { await sincronizar({ bajar: true, manual: true }); snack('Todo está sincronizado.'); }
+  catch (e) { snack(e.offline ? 'Sin conexión. Tus cambios se subirán cuando vuelva el internet.' : e.message); }
+  finally { listo(); }
+};
 
 function pintarMenu() {
   $('#asistente-switch').setAttribute('aria-checked', String(asistenteActivo()));
   $('#instalar').hidden = !promptInstalar || instalada();
-  $('#pie-nombre').textContent = S.usuario.nombre;
-  $('#pie-area').textContent = `Área de ${S.area.nombre}`;
+  if (!YO) return;
+  $('[data-nav="usuarios"]').hidden = YO.rol !== 'admin';
+  $('#pie-nombre').textContent = YO.nombre;
+  $('#pie-area').textContent = `${YO.rol === 'admin' ? 'Administrador · ' : ''}Área de ${S.area.nombre}`;
+  pintarEstado();
 }
 
 /* ---------------- pantalla: Hoy ---------------- */
@@ -504,13 +682,7 @@ async function transcribir(e, blob) {
     if (envio.size > 3.8 * 1024 * 1024) throw new Error('La nota es demasiado larga para transcribirla de una vez. Grábala en partes más cortas.');
 
     const b64 = await blobB64(envio);
-    const r = await fetch('/api/transcribir', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audio: b64, mime })
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Error del servidor');
-    const { texto } = j;
+    const { texto } = await apiIA('/api/transcribir', { audio: b64, mime });
     if (!texto) throw new Error('vacío');
     e.contenido = texto; e.transcripcionRaw = texto; e.estado = 'listo';
   } catch (err) {
@@ -553,12 +725,7 @@ async function generar(d) {
   const listo = cargando('Generando la bitácora…');
   const entradas = d.entradas.filter(e => e.contenido).map(e => ({ id: e.id, hora: e.hora, texto: e.contenido }));
   try {
-    const r = await fetch('/api/generar', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ area: S.area.nombre, fecha: d.fecha, entradas })
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Error del servidor');
+    const j = await apiIA('/api/generar', { area: S.area.nombre, fecha: d.fecha, entradas });
     d.bitacora = {
       actividades: (j.actividades || []).map(a => ({ id: uid(), titulo: a.titulo || '', descripcion: a.descripcion || '', entradasRef: a.entradas_ref || [] })),
       conclusion: j.conclusion || '',
@@ -707,12 +874,7 @@ function bloqueCierre(d) {
 async function generarCierre(d) {
   const listo = cargando('Generando el cierre…');
   try {
-    const r = await fetch('/api/cierre', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ area: S.area.nombre, fecha: d.fecha, actividades: d.bitacora.actividades })
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Error del servidor');
+    const j = await apiIA('/api/cierre', { area: S.area.nombre, fecha: d.fecha, actividades: d.bitacora.actividades });
     if (!j.conclusion) throw new Error('La IA no devolvió conclusión.');
     d.bitacora.conclusion = j.conclusion;
     save(); snack('Cierre generado');
@@ -858,36 +1020,530 @@ function historialDias() {
 
 /* ---------------- pantalla: Perfil ---------------- */
 function vistaPerfil() {
-  const bar = encabezado('Perfil', 'Ajustes del área');
+  const bar = encabezado('Perfil', `Hola, ${YO.nombre.split(' ')[0]}`);
+  const guardados = Object.values(S.dias).filter(d => !diaVacio(d)).length;
   const page = el(`<div class="page"><div style="max-width:640px">
     <div class="section-title">Área</div>
     <div class="card">
       <div class="campo" data-guide="perfil-area">
         <label for="area">Nombre del área</label>
-        <input class="input" id="area" value="${esc(S.area.nombre)}" autocomplete="off">
+        <input class="input" id="area" value="${esc(S.area.nombre)}" autocomplete="off" maxlength="60">
         <span class="ayuda">Aparece en cada pantalla y en el PDF.</span>
       </div>
     </div>
     <div class="section-title">Tu cuenta</div>
-    <div class="card">
-      <div class="campo" data-guide="perfil-nombre">
+    <div class="card" data-guide="perfil-cuenta">
+      <div class="campo">
         <label for="nombre">Tu nombre</label>
-        <input class="input" id="nombre" value="${esc(S.usuario.nombre)}" autocomplete="name">
+        <input class="input" id="nombre" value="${esc(YO.nombre)}" autocomplete="name" maxlength="120">
         <span class="ayuda">Se guarda con cada entrada; no aparece en el PDF por actividad.</span>
+      </div>
+      <div class="campo">
+        <label for="correo">Correo</label>
+        <input class="input" id="correo" value="${esc(YO.email)}" readonly>
+        <span class="ayuda">Con él entras a la app. Solo un administrador puede cambiarlo.</span>
       </div>
     </div>
     <div class="section-title">Datos</div>
     <div class="card dato" data-guide="perfil-datos">
       <span class="dato-label">Días guardados</span>
-      <span class="dato-valor">${Object.keys(S.dias).length} en este dispositivo</span>
+      <span class="dato-valor">${guardados} en tu cuenta</span>
     </div>
     <p class="firma">Diseñarte México · Marketing e Innovación Digital</p>
   </div>
   </div>`);
 
-  page.querySelector('#area').onchange = e => { S.area.nombre = e.target.value.trim() || 'Área'; save(); render(); snack('Área guardada'); };
-  page.querySelector('#nombre').onchange = e => { S.usuario.nombre = e.target.value.trim() || 'Tú'; save(); pintarMenu(); snack('Nombre guardado'); };
+  const guardarCampo = async (campo, input, aviso) => {
+    const valor = input.value.trim();
+    if (valor === YO[campo]) return;
+    if (valor.length < (campo === 'nombre' ? 2 : 1)) { input.value = YO[campo]; return snack(campo === 'nombre' ? 'Escribe tu nombre.' : 'Escribe el nombre del área.'); }
+    const listo = cargando('Guardando…');
+    try {
+      const { usuario } = await api('/api/cuenta', 'PATCH', { [campo]: valor });
+      recordarUsuario(usuario);
+      render(); snack(aviso);
+    } catch (e) {
+      if (e.status === 401) return sesionVencida();
+      input.value = YO[campo]; snack(e.message);
+    } finally { listo(); }
+  };
+  page.querySelector('#area').onchange = e => guardarCampo('area', e.target, 'Área guardada');
+  page.querySelector('#nombre').onchange = e => guardarCampo('nombre', e.target, 'Nombre guardado');
   return [bar, page];
+}
+
+/* ---------------- pantalla: Usuarios (solo admin) ---------------- */
+let usuariosLista = null, usuariosError = '';
+
+async function cargarUsuarios() {
+  const listo = cargando('Cargando usuarios…');
+  try { usuariosLista = (await api('/api/usuarios')).usuarios; usuariosError = ''; }
+  catch (e) {
+    if (e.status === 401) return sesionVencida();
+    usuariosLista = []; usuariosError = e.message;
+  } finally { listo(); }
+  if (vista === 'usuarios') { render(); guiaAlEntrar(); }
+}
+
+const fechaHora = (iso) => iso ? new Date(iso).toLocaleString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'nunca';
+
+function vistaUsuarios() {
+  const bar = encabezado('Usuarios', 'Panel de administración', null,
+    `<button class="btn primario" id="nuevo-usuario" data-guide="nuevo-usuario" aria-label="Nuevo usuario">${ico('user-plus')}<span class="solo-ancho">Nuevo usuario</span></button>`);
+  bar.querySelector('#nuevo-usuario').onclick = () => formUsuario();
+  const page = el('<div class="page"></div>');
+  if (!usuariosLista) return [bar, page];
+
+  if (usuariosError) {
+    page.append(el(`<div class="aviso">${ico('alert')}<div><strong>No se pudo cargar la lista.</strong><div class="aviso-detalle">${esc(usuariosError)}</div></div></div>`));
+    const b = el(`<button class="btn contorno">${ico('refresh')}Reintentar</button>`);
+    b.onclick = () => cargarUsuarios();
+    page.append(b);
+    return [bar, page];
+  }
+
+  const activos = usuariosLista.filter(u => u.activo).length;
+  page.append(el(`<div class="section-title">${usuariosLista.length} cuenta${usuariosLista.length === 1 ? '' : 's'} · ${activos} activa${activos === 1 ? '' : 's'}</div>`));
+  const lista = el('<div class="usuarios"></div>');
+  usuariosLista.forEach((u, i) => {
+    const propio = u.id === YO.id;
+    const c = el(`<article class="usuario ${u.activo ? '' : 'inactivo'}" ${i === 0 ? 'data-guide="usuario"' : ''}>
+      <div class="avatar">${esc(u.nombre.trim()[0]?.toUpperCase() || '?')}</div>
+      <div class="usuario-body">
+        <div class="usuario-nombre">${esc(u.nombre)}${propio ? ' <span class="usuario-tu">(tú)</span>' : ''}
+          ${u.rol === 'admin' ? '<span class="chip-estado" data-estado="admin">Admin</span>' : ''}
+          ${u.activo ? '' : '<span class="chip-estado" data-estado="inactivo">Desactivado</span>'}
+        </div>
+        <div class="usuario-meta">${esc(u.email)}</div>
+        <div class="usuario-meta">Área de ${esc(u.area)} · ${u.dias} día${u.dias === 1 ? '' : 's'} cerrado${u.dias === 1 ? '' : 's'} · Último acceso: ${esc(fechaHora(u.ultimoAcceso))}</div>
+        ${u.debeCambiar && u.activo ? '<div class="usuario-aviso">Aún no cambia su contraseña temporal</div>' : ''}
+      </div>
+      <button class="mini" aria-label="Opciones de ${esc(u.nombre)}" title="Editar, contraseña, desactivar o eliminar">${ico('ellipsis-vertical')}</button>
+    </article>`);
+    c.querySelector('.mini').onclick = () => menuUsuario(u);
+    lista.append(c);
+  });
+  page.append(lista);
+  return [bar, page];
+}
+
+function menuUsuario(u) {
+  const propio = u.id === YO.id;
+  sheet(`<h2>${esc(u.nombre)}</h2>
+    <p class="desc" style="margin-bottom:8px">${esc(u.email)}</p>
+    <button class="list-opt" data-a="editar">${ico('pencil')}Editar datos</button>
+    ${propio ? '' : `<button class="list-opt" data-a="pass">${ico('key')}Restablecer contraseña</button>
+    <button class="list-opt" data-a="activo">${ico(u.activo ? 'user-x' : 'user-check')}${u.activo ? 'Desactivar cuenta' : 'Activar cuenta'}</button>
+    <button class="list-opt peligro" data-a="borrar">${ico('trash')}Eliminar cuenta</button>`}`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="editar"]').onclick = () => { close(); formUsuario(u); };
+      s.querySelector('[data-a="pass"]')?.addEventListener('click', () => { close(); restablecerPassword(u); });
+      s.querySelector('[data-a="activo"]')?.addEventListener('click', () => { close(); cambiarActivo(u); });
+      s.querySelector('[data-a="borrar"]')?.addEventListener('click', () => { close(); eliminarUsuario(u); });
+    } });
+}
+
+/* Contraseña temporal legible: sin 0/O ni 1/l/I. */
+function passwordTemporal() {
+  const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  return [...crypto.getRandomValues(new Uint32Array(10))].map(n => abc[n % abc.length]).join('');
+}
+
+/* Ejecuta una acción de admin con pantalla de carga; si falla, muestra el error. */
+async function accionAdmin(mensaje, fn) {
+  const listo = cargando(mensaje);
+  try { return await fn(); }
+  catch (e) { if (e.status === 401) sesionVencida(); else snack(e.message); return null; }
+  finally { listo(); }
+}
+
+const actualizarEnLista = (u) => {
+  const i = usuariosLista.findIndex(x => x.id === u.id);
+  if (i >= 0) usuariosLista[i] = { ...usuariosLista[i], ...u }; else usuariosLista.push(u);
+  if (u.id === YO.id) recordarUsuario({ ...YO, nombre: u.nombre, email: u.email, area: u.area, rol: u.rol });
+  if (vista === 'usuarios') render();
+};
+
+function formUsuario(u = null) {
+  const nuevo = !u;
+  const propio = u?.id === YO.id;
+  sheet(`<h2>${nuevo ? 'Nuevo usuario' : 'Editar usuario'}</h2>
+    <form class="form-sheet" novalidate>
+      ${campoHTML('nombre', 'Nombre', { valor: u?.nombre, auto: 'off' })}
+      ${campoHTML('email', 'Correo', { tipo: 'email', valor: u?.email, auto: 'off', ayuda: 'Con este correo entrará a la app.' })}
+      ${campoHTML('area', 'Área', { valor: u?.area ?? S.area.nombre, auto: 'off', ayuda: 'Aparece en sus pantallas y en sus PDF.' })}
+      <div class="campo">
+        <label for="f-rol">Rol</label>
+        <select class="input" id="f-rol" name="rol" ${propio ? 'disabled' : ''}>
+          <option value="usuario" ${u?.rol !== 'admin' ? 'selected' : ''}>Usuario: captura sus bitácoras</option>
+          <option value="admin" ${u?.rol === 'admin' ? 'selected' : ''}>Administrador: además administra usuarios</option>
+        </select>
+        ${propio ? '<span class="ayuda">No puedes cambiar tu propio rol.</span>' : ''}
+      </div>
+      ${nuevo ? `<div class="campo">
+        <label for="f-password">Contraseña temporal</label>
+        <div class="campo-fila">
+          <input class="input" id="f-password" name="password" value="${passwordTemporal()}" autocomplete="off" spellcheck="false">
+          <button class="iconbtn" type="button" data-a="gen" title="Generar otra" aria-label="Generar otra contraseña">${ico('refresh')}</button>
+        </div>
+        <span class="ayuda">Mínimo ${PASSWORD_MIN} caracteres. Al entrar por primera vez, la app le pedirá crear la suya.</span>
+      </div>` : ''}
+      <div class="aviso-form" role="alert" hidden></div>
+      <div class="sheet-actions"><button class="btn fantasma" type="button" data-a="cancel">Cancelar</button>
+        <button class="btn primario" type="submit">${nuevo ? 'Crear usuario' : 'Guardar'}</button></div>
+    </form>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('[data-a="gen"]')?.addEventListener('click', () => { s.querySelector('#f-password').value = passwordTemporal(); });
+      enviarForm(s.querySelector('form'), nuevo ? 'Creando usuario…' : 'Guardando…', async (f) => {
+        exigir(f, { nombre: 'Escribe el nombre.', email: 'Escribe el correo.', area: 'Escribe el área.' });
+        if (nuevo) {
+          if ((f.password || '').length < PASSWORD_MIN) throw new Error(`La contraseña temporal debe tener al menos ${PASSWORD_MIN} caracteres.`);
+          const { usuario } = await api('/api/usuarios', 'POST', f);
+          close(); actualizarEnLista(usuario);
+          mostrarCredenciales('Usuario creado', usuario, f.password);
+        } else {
+          const { usuario } = await api('/api/usuarios', 'PATCH', { id: u.id, nombre: f.nombre, email: f.email, area: f.area, ...(propio ? {} : { rol: f.rol }) });
+          close(); actualizarEnLista(usuario); snack('Usuario guardado');
+        }
+      });
+    } });
+}
+
+function restablecerPassword(u) {
+  sheet(`<h2>Restablecer contraseña</h2>
+    <p class="desc">Se genera una contraseña temporal para ${esc(u.nombre)} y se cierran sus sesiones abiertas. Al entrar, la app le pedirá crear una nueva.</p>
+    <div class="sheet-actions"><button class="btn fantasma" data-a="cancel">Cancelar</button><button class="btn primario" data-a="ok">Restablecer</button></div>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('[data-a="ok"]').onclick = async () => {
+        close();
+        const pw = passwordTemporal();
+        const r = await accionAdmin('Guardando la contraseña…', () => api('/api/usuarios', 'PATCH', { id: u.id, password: pw }));
+        if (r) { actualizarEnLista(r.usuario); mostrarCredenciales('Contraseña restablecida', r.usuario, pw); }
+      };
+    } });
+}
+
+function cambiarActivo(u) {
+  const activar = !u.activo;
+  sheet(`<h2>${activar ? 'Activar cuenta' : 'Desactivar cuenta'}</h2>
+    <p class="desc">${activar
+      ? `${esc(u.nombre)} podrá volver a entrar con su correo y contraseña.`
+      : `${esc(u.nombre)} ya no podrá entrar y se cerrarán sus sesiones abiertas. Sus bitácoras se conservan y puedes reactivarla cuando quieras.`}</p>
+    <div class="sheet-actions"><button class="btn fantasma" data-a="cancel">Cancelar</button><button class="btn ${activar ? 'primario' : 'destructivo'}" data-a="ok">${activar ? 'Activar' : 'Desactivar'}</button></div>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('[data-a="ok"]').onclick = async () => {
+        close();
+        const r = await accionAdmin('Guardando…', () => api('/api/usuarios', 'PATCH', { id: u.id, activo: activar }));
+        if (r) { actualizarEnLista(r.usuario); snack(activar ? 'Cuenta activada' : 'Cuenta desactivada'); }
+      };
+    } });
+}
+
+function eliminarUsuario(u) {
+  sheet(`<h2>Eliminar cuenta</h2>
+    <p class="desc">Se borran la cuenta de ${esc(u.nombre)} y sus ${u.dias} día${u.dias === 1 ? '' : 's'} de bitácora guardados en el servidor. No se puede deshacer.</p>
+    <p class="desc" style="margin-top:8px">Si solo quieres quitarle el acceso, mejor desactiva la cuenta.</p>
+    <div class="sheet-actions"><button class="btn fantasma" data-a="cancel">Cancelar</button><button class="btn destructivo" data-a="ok">Eliminar</button></div>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('[data-a="ok"]').onclick = async () => {
+        close();
+        const r = await accionAdmin('Eliminando…', () => api(`/api/usuarios?id=${u.id}`, 'DELETE'));
+        if (r) { usuariosLista = usuariosLista.filter(x => x.id !== u.id); render(); snack('Cuenta eliminada'); }
+      };
+    } });
+}
+
+function mostrarCredenciales(titulo, u, pw) {
+  const texto = `Bitácora · Diseñarte México\n${location.origin}\nCorreo: ${u.email}\nContraseña temporal: ${pw}`;
+  sheet(`<h2>${esc(titulo)}</h2>
+    <p class="desc">Comparte estos datos con ${esc(u.nombre)}. Al entrar, la app le pedirá crear su propia contraseña. Esta contraseña no se vuelve a mostrar.</p>
+    <dl class="credenciales">
+      <dt>Correo</dt><dd>${esc(u.email)}</dd>
+      <dt>Contraseña temporal</dt><dd class="mono">${esc(pw)}</dd>
+    </dl>
+    <div class="sheet-actions"><button class="btn contorno" data-a="copiar">${ico('copy')}Copiar datos</button><button class="btn primario" data-a="ok">Listo</button></div>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="ok"]').onclick = close;
+      s.querySelector('[data-a="copiar"]').onclick = async () => {
+        try { await navigator.clipboard.writeText(texto); snack('Datos copiados'); }
+        catch { snack('No se pudo copiar. Selecciona el texto y cópialo a mano.'); }
+      };
+    } });
+}
+
+/* ---------------- formularios ---------------- */
+function campoHTML(nombre, etiqueta, { tipo = 'text', valor = '', auto = 'off', ayuda = '', autofocus = false } = {}) {
+  return `<div class="campo">
+    <label for="f-${nombre}">${esc(etiqueta)}</label>
+    <input class="input" id="f-${nombre}" name="${nombre}" type="${tipo}" value="${esc(valor ?? '')}" autocomplete="${auto}" ${autofocus ? 'autofocus' : ''} ${tipo === 'email' ? 'inputmode="email" autocapitalize="off" spellcheck="false"' : ''}>
+    ${ayuda ? `<span class="ayuda">${esc(ayuda)}</span>` : ''}
+  </div>`;
+}
+
+function exigir(f, mensajes) {
+  for (const [k, m] of Object.entries(mensajes)) if (!String(f[k] || '').trim()) throw new Error(m);
+}
+
+/* Envía un formulario con pantalla de carga; los errores salen en su .aviso-form. */
+function enviarForm(form, mensaje, fn) {
+  const aviso = form.querySelector('.aviso-form');
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    aviso.hidden = true;
+    const datos = Object.fromEntries(new FormData(form));
+    const listo = cargando(mensaje);
+    try { await fn(datos); }
+    catch (e) {
+      if (e.status === 401 && YO) { listo(); return sesionVencida(); }
+      aviso.textContent = e.message; aviso.hidden = false;
+    } finally { listo(); }
+  });
+}
+
+/* ---------------- acceso: entrar, configuración inicial y contraseña ---------------- */
+const MARCA = (img, tam) => `<div class="marca"><img src="icons/${img}" alt="" width="${tam}" height="${tam}">
+  <div><div class="marca-nombre">Bitácora</div><div class="marca-sub">Diseñarte México</div></div></div>`;
+
+/* Escritorio: panel morado con la marca a la izquierda y la tarjeta sobre la textura.
+   Celular: la marca a color arriba de la tarjeta. */
+function pantallaAcceso(titulo, descripcion, cuerpo) {
+  cerrarGuia(); cerrarMenu();
+  document.querySelectorAll('#sheet-root > *, #snackbar-root > *').forEach(n => n.remove());
+  $('#app').hidden = true;
+  const a = $('#acceso');
+  a.hidden = false;
+  a.innerHTML = `<main class="acceso">
+    <section class="acceso-panel">
+      <div class="acceso-panel-centro">
+        <div class="acceso-marca-grande">${MARCA('hoja-blanca.svg', 76)}</div>
+        <div class="filete acceso-filete"></div>
+        <p class="acceso-frase">Registra el día de tu área por voz o por escrito y entrégalo en PDF.</p>
+      </div>
+      <p class="acceso-web">www.disenartemx.com</p>
+    </section>
+    <section class="acceso-lado">
+      <div class="acceso-col">
+        <div class="acceso-marca-movil">${MARCA('hoja.svg', 52)}</div>
+        <div class="card acceso-card">
+          <h1 class="acceso-titulo">${esc(titulo)}</h1>
+          <p class="acceso-desc">${esc(descripcion)}</p>
+          ${cuerpo}
+        </div>
+      </div>
+    </section>
+  </main>`;
+  a.querySelector('[autofocus]')?.focus();
+  return a;
+}
+
+function pantallaLogin(aviso = '') {
+  const a = pantallaAcceso('Iniciar sesión', 'Usa el correo y la contraseña que te dio el administrador.', `
+    <form class="form-acceso" novalidate>
+      ${campoHTML('email', 'Correo', { tipo: 'email', auto: 'username', autofocus: true })}
+      ${campoHTML('password', 'Contraseña', { tipo: 'password', auto: 'current-password' })}
+      <div class="aviso-form" role="alert" ${aviso ? '' : 'hidden'}>${esc(aviso)}</div>
+      <button class="btn primario full" type="submit">Entrar</button>
+    </form>`);
+  enviarForm(a.querySelector('form'), 'Entrando…', async (f) => {
+    exigir(f, { email: 'Escribe tu correo.', password: 'Escribe tu contraseña.' });
+    const { usuario } = await api('/api/sesion', 'POST', { email: f.email, password: f.password });
+    await entrar(usuario);
+  });
+}
+
+function pantallaConfiguracion() {
+  const a = pantallaAcceso('Configuración inicial',
+    'Crea la cuenta de administrador. Este paso solo aparece una vez, mientras no exista ninguna cuenta.', `
+    <form class="form-acceso" novalidate>
+      ${campoHTML('nombre', 'Nombre', { auto: 'name', autofocus: true })}
+      ${campoHTML('email', 'Correo', { tipo: 'email', auto: 'username' })}
+      ${campoHTML('area', 'Área', { valor: 'Dirección', ayuda: 'El área de tus propias bitácoras. Puedes cambiarla después en Perfil.' })}
+      ${campoHTML('password', 'Contraseña', { tipo: 'password', auto: 'new-password', ayuda: `Mínimo ${PASSWORD_MIN} caracteres.` })}
+      ${campoHTML('confirmacion', 'Confirmar contraseña', { tipo: 'password', auto: 'new-password' })}
+      <div class="aviso-form" role="alert" hidden></div>
+      <button class="btn primario full" type="submit">Crear cuenta de admin</button>
+    </form>`);
+  enviarForm(a.querySelector('form'), 'Creando la cuenta…', async (f) => {
+    exigir(f, { nombre: 'Escribe tu nombre.', email: 'Escribe tu correo.', area: 'Escribe el área.', password: 'Escribe una contraseña.' });
+    if (f.password.length < PASSWORD_MIN) throw new Error(`La contraseña debe tener al menos ${PASSWORD_MIN} caracteres.`);
+    if (f.password !== f.confirmacion) throw new Error('Las contraseñas no coinciden.');
+    try {
+      const { usuario } = await api('/api/configuracion-inicial', 'POST', f);
+      await entrar(usuario);
+    } catch (e) {
+      // Alguien ya la hizo: pasar al login.
+      if (e.status === 409) return pantallaLogin(e.message);
+      throw e;
+    }
+  });
+}
+
+/* Primer acceso con contraseña temporal: hay que crear una propia antes de seguir. */
+function pantallaPasswordNueva(usuario) {
+  const a = pantallaAcceso('Crea tu contraseña',
+    `Hola, ${usuario.nombre.split(' ')[0]}. Entraste con una contraseña temporal; crea una propia para continuar.`, `
+    <form class="form-acceso" novalidate>
+      <input type="email" name="usuario" value="${esc(usuario.email)}" autocomplete="username" hidden>
+      ${campoHTML('nueva', 'Contraseña nueva', { tipo: 'password', auto: 'new-password', autofocus: true, ayuda: `Mínimo ${PASSWORD_MIN} caracteres.` })}
+      ${campoHTML('confirmacion', 'Confirmar contraseña', { tipo: 'password', auto: 'new-password' })}
+      <div class="aviso-form" role="alert" hidden></div>
+      <button class="btn primario full" type="submit">Guardar contraseña</button>
+      <button class="btn fantasma full" type="button" data-a="salir">Salir</button>
+    </form>`);
+  a.querySelector('[data-a="salir"]').onclick = () => cerrarSesion();
+  enviarForm(a.querySelector('form'), 'Guardando la contraseña…', async (f) => {
+    if ((f.nueva || '').length < PASSWORD_MIN) throw new Error(`La contraseña debe tener al menos ${PASSWORD_MIN} caracteres.`);
+    if (f.nueva !== f.confirmacion) throw new Error('Las contraseñas no coinciden.');
+    const { usuario: act } = await api('/api/cuenta', 'POST', { nueva: f.nueva });
+    await entrar(act);
+    snack('Contraseña guardada');
+  });
+}
+
+function pantallaSinServidor(mensaje) {
+  const a = pantallaAcceso('No se pudo conectar', mensaje, `
+    <button class="btn primario full" type="button" data-a="otra">${ico('refresh')}Intentar de nuevo</button>`);
+  a.querySelector('[data-a="otra"]').onclick = () => arranque();
+}
+
+/* Cambio de contraseña con la sesión abierta (desde el menú). */
+function cambiarPassword() {
+  sheet(`<h2>Cambiar contraseña</h2>
+    <form class="form-sheet" novalidate>
+      <input type="email" name="usuario" value="${esc(YO.email)}" autocomplete="username" hidden>
+      ${campoHTML('actual', 'Contraseña actual', { tipo: 'password', auto: 'current-password' })}
+      ${campoHTML('nueva', 'Contraseña nueva', { tipo: 'password', auto: 'new-password', ayuda: `Mínimo ${PASSWORD_MIN} caracteres. Se cerrará tu sesión en los demás dispositivos.` })}
+      ${campoHTML('confirmacion', 'Confirmar contraseña nueva', { tipo: 'password', auto: 'new-password' })}
+      <div class="aviso-form" role="alert" hidden></div>
+      <div class="sheet-actions"><button class="btn fantasma" type="button" data-a="cancel">Cancelar</button><button class="btn primario" type="submit">Guardar</button></div>
+    </form>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      enviarForm(s.querySelector('form'), 'Guardando la contraseña…', async (f) => {
+        exigir(f, { actual: 'Escribe tu contraseña actual.' });
+        if ((f.nueva || '').length < PASSWORD_MIN) throw new Error(`La contraseña nueva debe tener al menos ${PASSWORD_MIN} caracteres.`);
+        if (f.nueva !== f.confirmacion) throw new Error('Las contraseñas nuevas no coinciden.');
+        await api('/api/cuenta', 'POST', { actual: f.actual, nueva: f.nueva });
+        close(); snack('Contraseña cambiada');
+      });
+    } });
+}
+
+/* ---------------- sesión ---------------- */
+function recordarUsuario(u) {
+  YO = u;
+  S.area.nombre = u.area;
+  S.usuario = { id: u.id, nombre: u.nombre };
+  try { localStorage.setItem(KEY_SESION, JSON.stringify(u)); } catch {}
+  pintarMenu();
+}
+
+async function entrar(usuario, { sinConexion = false } = {}) {
+  if (usuario.debeCambiar) return pantallaPasswordNueva(usuario);
+  YO = usuario;
+  cargarLocal();
+  recordarUsuario(usuario);
+  estadoSync = sinConexion ? 'sin-conexion' : 'ok';
+  // Antes de mostrar la app se bajan las bitácoras de la cuenta (dentro de "Entrando…").
+  const bajo = sinConexion ? false : await sincronizar({ bajar: true });
+  if (YO !== usuario) return;   // la sesión venció mientras tanto
+  if (bajo) pasarDatosViejos();
+
+  $('#acceso').hidden = true; $('#acceso').innerHTML = '';
+  $('#app').hidden = false;
+  nav('hoy', hoyISO());
+  if (sinConexion) snack('Sin conexión con el servidor. Puedes capturar; tus cambios se subirán al volver el internet.');
+}
+
+/* Las bitácoras que había en este dispositivo antes de las cuentas pasan a la primera cuenta que entra. */
+function pasarDatosViejos() {
+  let viejo = null;
+  try { viejo = JSON.parse(localStorage.getItem(KEY_VIEJA)); } catch {}
+  const dias = Object.values(viejo?.dias || {}).filter(d => d?.fecha && !diaVacio(d));
+  let n = 0;
+  dias.forEach(d => {
+    if (S.dias[d.fecha]) return;
+    d.entradas.forEach(e => { if (e.usuarioId === 'u1') { e.usuarioId = YO.id; e.usuarioNombre = viejo.usuario?.nombre === 'Tú' || !viejo.usuario?.nombre ? YO.nombre : viejo.usuario.nombre; } });
+    S.dias[d.fecha] = d; n++;
+  });
+  try {
+    if (viejo) { localStorage.setItem(`${KEY_VIEJA}.respaldo`, JSON.stringify(viejo)); localStorage.removeItem(KEY_VIEJA); }
+  } catch {}
+  if (n) { save(); snack(n === 1 ? 'Se pasó a tu cuenta 1 día que estaba guardado en este dispositivo.' : `Se pasaron a tu cuenta ${n} días que estaban guardados en este dispositivo.`); }
+}
+
+/* Limpia la sesión local. Si quedó algo sin subir, se conserva en el dispositivo para la próxima vez. */
+function olvidarSesion() {
+  clearTimeout(syncTimer);
+  try {
+    localStorage.removeItem(KEY_SESION);
+    if (YO && !pendientes.size) localStorage.removeItem(keyUsuario(YO.id));
+  } catch {}
+  YO = null;
+  S = { area: { nombre: '' }, usuario: { id: '', nombre: '' }, dias: {} };
+  pendientes = new Set(); enServidor = new Set(); firmas = {};
+  usuariosLista = null;
+  guiaVista.clear();
+  if (rec) cancelarGrabacion();
+}
+
+function sesionVencida() {
+  if (!YO) return;
+  guardarLocal();
+  olvidarSesion();
+  pantallaLogin('Tu sesión terminó. Vuelve a entrar.');
+}
+
+async function cerrarSesion() {
+  const listo = cargando('Cerrando sesión…');
+  try { await Promise.race([api('/api/sesion', 'DELETE'), espera(3000)]); } catch {}
+  olvidarSesion();
+  pantallaLogin();
+  listo();
+}
+
+async function salir() {
+  cerrarMenu();
+  if (pendientes.size) {
+    const listo = cargando('Sincronizando…');
+    await sincronizar().catch(() => {});
+    listo();
+  }
+  if (!pendientes.size) return cerrarSesion();
+  const n = pendientes.size;
+  sheet(`<h2>Hay cambios sin subir</h2>
+    <p class="desc">${n} día${n === 1 ? '' : 's'} con cambios no se ha${n === 1 ? '' : 'n'} subido al servidor porque no hay conexión.
+    Si sales ahora, se quedan en este dispositivo y se suben la próxima vez que entres aquí con tu cuenta.</p>
+    <div class="sheet-actions"><button class="btn fantasma" data-a="cancel">Cancelar</button><button class="btn primario" data-a="ok">Salir de todos modos</button></div>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('[data-a="ok"]').onclick = () => { close(); cerrarSesion(); };
+    } });
+}
+
+/* Al abrir: ¿falta la configuración inicial?, ¿hay sesión? Sin servidor, abre con el último usuario. */
+async function arranque() {
+  const listo = cargando('Abriendo Bitácora…');
+  try {
+    let r;
+    try { r = await api('/api/sesion'); }
+    catch (e) {
+      let cache = null;
+      try { cache = JSON.parse(localStorage.getItem(KEY_SESION)); } catch {}
+      if (cache?.id) return await entrar(cache, { sinConexion: true });
+      return pantallaSinServidor(e.message);
+    }
+    if (r.configurar) return pantallaConfiguracion();
+    if (!r.usuario) {
+      try { localStorage.removeItem(KEY_SESION); } catch {}
+      return pantallaLogin();
+    }
+    await entrar(r.usuario);
+  } finally { listo(); }
 }
 
 /* ---------------- PDF ---------------- */
@@ -1082,14 +1738,17 @@ const PASOS_MENU = () => [
   { t: 'menu-secciones', m: true, titulo: 'Secciones', texto: 'Estas son las pantallas de la app:',
     lista: [['Hoy', 'capturas las entradas del día y lo cierras para generar la bitácora.'],
             ['Historial', 'consultas los días cerrados y exportas el PDF de un día o de toda la semana.'],
-            ['Perfil', 'cambias el nombre del área y tu nombre.']] },
+            ['Perfil', 'cambias el nombre del área y tu nombre.'],
+            ...(YO?.rol === 'admin' ? [['Usuarios', 'creas y administras las cuentas de quienes usan la app (solo administradores).']] : [])] },
   { t: 'menu-cuenta', m: true, titulo: 'Cuenta', texto: 'Opciones para usar la app:',
-    lista: [['Asistente de uso', 'enciende o apaga esta guía. Encendido, aparece al entrar a cada pantalla.'],
+    lista: [['Sincronizar', 'sube tus cambios al servidor y trae lo que hayas capturado en otro dispositivo. También pasa sola.'],
+            ['Cambiar contraseña', 'cambia la contraseña con la que entras.'],
+            ['Asistente de uso', 'enciende o apaga esta guía. Encendido, aparece al entrar a cada pantalla.'],
             ['Ver guía de esta pantalla', 'muestra la guía de donde estés, aunque el asistente esté apagado.'],
             ...(!$('#instalar').hidden ? [['Instalar como app', 'agrega Bitácora a tu pantalla de inicio para abrirla como cualquier app.']] : [])] },
-  { t: 'menu-pie', m: true, titulo: 'Tus datos',
-    texto: 'Aquí ves tu nombre y tu área. Todo lo que capturas, incluidos los audios, se guarda en este dispositivo.',
-    nota: 'No hay sesión que cerrar. Si borras los datos del navegador, se pierden las bitácoras guardadas aquí.' },
+  { t: 'menu-pie', m: true, titulo: 'Tu cuenta',
+    texto: 'Aquí ves tu nombre, tu área y si tus bitácoras ya están guardadas en el servidor. Con Salir cierras tu sesión en este dispositivo.',
+    nota: 'Tus bitácoras se guardan en tu cuenta: entra desde otro teléfono o computadora y ahí estarán. Sin internet puedes seguir capturando; se suben solas al volver la conexión. Los audios se quedan en el dispositivo donde los grabaste.' },
   { t: 'ayuda', titulo: 'Ayuda en cualquier momento',
     texto: 'Este botón vuelve a mostrar la guía de la pantalla en la que estés, aunque hayas apagado el asistente.' }
 ];
@@ -1125,7 +1784,7 @@ const PASOS = {
     { t: 'regenerar', titulo: 'Regenerar', texto: 'Vuelve a generar la bitácora con IA a partir de las entradas. Se pierden las ediciones que hayas hecho.' }
   ],
   historial: () => [
-    { titulo: 'Historial', texto: 'Aquí están todos los días que ya cerraste en este dispositivo.' },
+    { titulo: 'Historial', texto: 'Aquí están todos los días que ya cerraste en tu cuenta.' },
     { t: 'pestanas', titulo: 'Por día o por semana', texto: 'Cambia entre la lista de días y el resumen por semana.' },
     { t: 'buscador', titulo: 'Buscar', texto: 'Escribe una palabra para encontrar los días cuya bitácora o entradas la mencionen.' },
     { t: 'dia', titulo: 'Un día cerrado', texto: 'Muestra cuántas actividades y entradas tiene y su estado. Tócalo para abrir su bitácora.' },
@@ -1135,8 +1794,19 @@ const PASOS = {
   perfil: () => [
     { titulo: 'Perfil', texto: 'Aquí ajustas los datos que aparecen en la bitácora. Los cambios se guardan al salir de cada campo.' },
     { t: 'perfil-area', titulo: 'Nombre del área', texto: 'Aparece en cada pantalla y en el PDF. Cámbialo si capturas para otra área.' },
-    { t: 'perfil-nombre', titulo: 'Tu nombre', texto: 'Se guarda con cada entrada que capturas, para saber quién la registró.' },
-    { t: 'perfil-datos', titulo: 'Datos', texto: 'Cuántos días hay guardados en este dispositivo.' }
+    { t: 'perfil-cuenta', titulo: 'Tu cuenta', texto: 'Tu nombre se guarda con cada entrada que capturas, para saber quién la registró. El correo es con el que entras; solo un administrador puede cambiarlo.' },
+    { t: 'perfil-datos', titulo: 'Datos', texto: 'Cuántos días tienes guardados en tu cuenta.' }
+  ],
+  usuarios: () => [
+    { titulo: 'Usuarios', texto: 'Aquí administras quién puede entrar a Bitácora. Cada persona tiene su cuenta y ve solo sus propias bitácoras.' },
+    { t: 'nuevo-usuario', titulo: 'Nuevo usuario',
+      texto: 'Crea la cuenta con nombre, correo, área, rol y una contraseña temporal. Al terminar te muestra los datos para que se los compartas.',
+      nota: 'En su primer acceso, la app le pide crear su propia contraseña.' },
+    { t: 'usuario', titulo: 'Una cuenta', texto: 'Muestra el correo, el área, cuántos días ha cerrado y su último acceso. Con el botón de opciones:',
+      lista: [['Editar datos', 'cambias nombre, correo, área o rol.'],
+              ['Restablecer contraseña', 'genera una temporal nueva si la olvidó.'],
+              ['Desactivar', 'le quitas el acceso sin borrar sus bitácoras.'],
+              ['Eliminar', 'borras la cuenta y sus bitácoras del servidor.']] }
   ]
 };
 
@@ -1265,8 +1935,8 @@ function abrirGuia(v = vista) {
 
 /* ---------------- atajos de teclado ---------------- */
 document.addEventListener('keydown', e => {
-  if (guiaActual) return;
-  const enCampo = /input|textarea/i.test(e.target.tagName) || e.target.isContentEditable;
+  if (guiaActual || !YO || $('#app').hidden) return;
+  const enCampo = /input|textarea|select/i.test(e.target.tagName) || e.target.isContentEditable;
   if (e.code === 'Space' && !enCampo && !$('.sheet') && !$('.carga') && vista === 'hoy' && dia(fechaVista).estado === 'abierto') {
     e.preventDefault();
     if (!rec) iniciarGrabacion(); else detenerGrabacion();
@@ -1276,7 +1946,7 @@ document.addEventListener('keydown', e => {
 });
 
 /* ---------------- arranque ---------------- */
-nav('hoy');
+arranque();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

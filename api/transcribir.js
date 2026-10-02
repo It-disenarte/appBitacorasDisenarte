@@ -1,9 +1,11 @@
 import { callGemini, GLOSARIO, leerBody } from './_gemini.js';
+import { conSesion } from './_servidor.js';
 
 export const config = { api: { bodyParser: { sizeLimit: '20mb' } } };
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
+  if (!(await conSesion(req, res))) return;
   try {
     const { audio, mime } = await leerBody(req);
     if (!audio) return res.status(400).json({ error: 'Falta el audio' });

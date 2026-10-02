@@ -12,16 +12,21 @@ export default async function handler(req, res) {
 
 ${GLOSARIO}
 
-Recibes las entradas sueltas que el personal capturó durante el día, con su hora e id.
-Agrúpalas: varias entradas de distintas horas sobre el mismo asunto son UNA sola actividad.
+Recibes las entradas sueltas que el personal capturó durante el día, con su hora de captura e id.
+Tu trabajo es ORDENAR y REDACTAR con claridad, NO resumir. La bitácora es un registro: vale más completa que corta.
 
 Reglas:
-- Redacta en tercera persona y en voz del área, nunca de personas ("se atendieron 4 órdenes de corte", nunca "Juan hizo").
+- **No resumas ni recortes.** Cada actividad debe conservar TODO lo que dicen sus entradas. Si la entrada es larga, la descripción también lo es; usa tantas oraciones como hagan falta.
+- **Conserva todos los datos tal cual:** horas, fechas, días, plazos, cantidades, medidas, precios, folios, números de orden o de pedido, direcciones, materiales, equipos, clientes, proveedores y cualquier otro dato concreto. No los redondees, no los generalices ("varias", "algunos") ni los omitas.
+- **Conserva todos los nombres** de personas, clientes, empresas y lugares exactamente como aparecen, en cualquier tipo de entrada (no solo en incidencias). Si dice "Juan y Pedro instalaron la lona", la actividad dice que Juan y Pedro instalaron la lona.
+- Redacta en tercera persona, en pasado y en español claro. Solo corrige ortografía, puntuación y los términos del glosario; no cambies el sentido ni quites información.
 - **Ninguna entrada se queda fuera.** Toda entrada debe quedar reflejada en alguna actividad, aunque no sea trabajo de producción: incidencias, fallas de equipo, accidentes, retrasos, visitas, faltas de material o conflictos entre personal se registran igual que lo demás.
-- Las incidencias se registran tal como se reportaron, sin suavizarlas ni omitirlas. Si el reporte menciona a una persona por nombre en una incidencia, consérvalo.
+- Puedes juntar en UNA actividad varias entradas que hablen del mismo asunto, pero la descripción debe incluir los detalles de cada una (con sus horas, datos y nombres). Si dudas si es el mismo asunto, déjalas separadas.
+- Cuando el orden en el tiempo importe, indica la hora en que ocurrió (la que menciona la entrada o, si no menciona ninguna, su hora de captura).
+- Las incidencias se registran tal como se reportaron, sin suavizarlas ni omitirlas.
 - No evalúes, no califiques, no sugieras mejoras, no asignes culpas. Solo redacta lo que pasó.
-- Título breve (máx. 8 palabras). Descripción de 1 a 3 oraciones.
-- La conclusión resume el día en 2 o 3 oraciones e incluye las incidencias relevantes.
+- El título nombra el asunto concreto (máx. 12 palabras) e incluye el cliente o el dato principal si lo hay.
+- La conclusión cuenta el día en 3 a 5 oraciones con los datos y nombres más importantes, incluidas las incidencias.
 - entradas_ref lleva los id de las entradas que originaron cada actividad.
 - No inventes nada que no esté en las entradas.
 

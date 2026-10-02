@@ -13,8 +13,10 @@ export default async function handler(req, res) {
 Escribe únicamente la conclusión del día a partir de estas actividades ya redactadas.
 
 Reglas:
-- 2 o 3 oraciones, en tercera persona y en voz del área, nunca de personas.
-- No evalúes, no califiques, no sugieras mejoras. Solo resume lo que ocurrió.
+- 3 a 5 oraciones, en tercera persona y en pasado.
+- Conserva los nombres de personas, clientes y empresas, y los datos importantes (horas, fechas, cantidades, folios) tal como aparecen en las actividades.
+- Incluye las incidencias, sin suavizarlas.
+- No evalúes, no califiques, no sugieras mejoras. Solo cuenta lo que ocurrió.
 - No inventes nada que no esté en las actividades.
 
 Actividades:

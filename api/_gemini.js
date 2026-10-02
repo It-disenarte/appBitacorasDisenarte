@@ -28,7 +28,7 @@ export async function leerBody(req) {
 
 export async function callGemini(parts, { json = false } = {}) {
   const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error('Falta la variable GEMINI_API_KEY en Vercel. Agrégala en Settings → Environment Variables y vuelve a desplegar.');
+  if (!key) throw new Error('Falta la variable GEMINI_API_KEY. Agrégala en Easypanel (servicio bitacora → Environment) y vuelve a desplegar.');
 
   let ultimo = '';
   for (const model of MODELOS()) {

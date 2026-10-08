@@ -10,6 +10,7 @@ const bitacora = (b) => b && ({
   actividades: (b.actividades || []).map(a => ({ titulo: a.titulo, descripcion: a.descripcion })),
   conclusion: b.conclusion || ''
 });
+const desperdicio = (x) => ({ material: x.material, cantidad: x.cantidad, unidad: x.unidad, motivo: x.motivo || '' });
 
 export default ruta({
   async GET(req) {
@@ -27,14 +28,19 @@ export default ruta({
       WHERE fecha BETWEEN $1::date AND $1::date + 6 ORDER BY fecha`, [lunes]);
 
     const dias = filas
-      .map(f => ({ ...f, entradas: (f.datos.entradas || []).filter(e => e.estado === 'listo' && e.contenido) }))
-      .filter(f => f.datos.estado !== 'abierto' || f.entradas.length)
+      .map(f => ({
+        ...f,
+        entradas: (f.datos.entradas || []).filter(e => e.estado === 'listo' && e.contenido),
+        desperdicios: Array.isArray(f.datos.desperdicios) ? f.datos.desperdicios : []
+      }))
+      .filter(f => f.datos.estado !== 'abierto' || f.entradas.length || f.desperdicios.length)
       .map(f => ({
         usuarioId: f.usuario_id,
         fecha: f.fecha,
         estado: f.datos.estado,
         entradas: f.entradas.map(entrada),
-        bitacora: bitacora(f.datos.bitacora)
+        bitacora: bitacora(f.datos.bitacora),
+        desperdicios: f.desperdicios.map(desperdicio)
       }));
 
     return { semana: lunes, usuarios, dias };

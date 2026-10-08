@@ -21,7 +21,7 @@ let enServidor = new Set();   // fechas que ya existen en el servidor
 let firmas = {};              // fecha → JSON del día la última vez que se guardó
 
 const firma = ({ actualizado, ...resto }) => JSON.stringify(resto);
-const diaVacio = (d) => d.estado === 'abierto' && !d.entradas.length && !d.bitacora;
+const diaVacio = (d) => d.estado === 'abierto' && !d.entradas.length && !d.bitacora && !d.desperdicios?.length;
 
 function cargarLocal() {
   let raw = null;
@@ -464,6 +464,7 @@ function vistaHoy() {
     [...d.entradas].reverse().forEach(e => lista.append(entradaCard(e, d)));
     page.append(el('<div class="section-title">Entradas del día</div>'), lista);
   }
+  page.append(seccionDesperdicio(d));
 
   const nodes = [bar, page];
 
@@ -555,6 +556,97 @@ function editarEntrada(e, d) {
         e.contenido = s.querySelector('#t').value.trim();
         e.estado = 'listo'; save(); close(); render(); snack('Entrada guardada');
       };
+    } });
+}
+
+/* ---------------- material desperdiciado en retrabajos ---------------- */
+/* Se guarda en el día: d.desperdicios = [{ id, material, cantidad, unidad, motivo }].
+   Se edita en Hoy y en la bitácora; sale en el PDF y en Equipo. */
+const UNIDADES = ['m²', 'm', 'piezas', 'hojas', 'litros', 'kg', 'otro'];
+const cantidadTxt = (x) => `${Number(x.cantidad).toLocaleString('es-MX', { maximumFractionDigits: 2 })} ${x.unidad === 'otro' ? '' : x.unidad}`.trim();
+
+function seccionDesperdicio(d, { editable = true } = {}) {
+  const lista = d.desperdicios || [];
+  const sec = el(`<section class="desperdicio" ${editable ? 'data-guide="desperdicio"' : ''}>
+    <div class="section-title">Material desperdiciado en retrabajos</div>
+    <div class="desp-lista"></div>
+  </section>`);
+  const cont = sec.querySelector('.desp-lista');
+  if (!lista.length && editable) cont.append(el('<p class="desp-vacio">Sin desperdicio registrado. Si se repitió un trabajo y se perdió material, anótalo aquí.</p>'));
+  lista.forEach(x => {
+    const item = el(`<div class="desp-item">
+      <div class="desp-body">
+        <div class="desp-titulo"><span>${esc(x.material)}</span><span class="desp-cant">${esc(cantidadTxt(x))}</span></div>
+        ${x.motivo ? `<p class="desp-motivo">${esc(x.motivo)}</p>` : ''}
+      </div>
+      ${editable ? `<button class="mini" aria-label="Opciones del desperdicio" title="Editar o eliminar">${ico('ellipsis-vertical')}</button>` : ''}
+    </div>`);
+    item.querySelector('.mini')?.addEventListener('click', () => menuDesperdicio(d, x));
+    cont.append(item);
+  });
+  if (editable) {
+    const b = el(`<button class="btn contorno full">${ico('plus')}Registrar desperdicio</button>`);
+    b.onclick = () => formDesperdicio(d);
+    sec.append(b);
+  }
+  return sec;
+}
+
+function menuDesperdicio(d, x) {
+  sheet(`<h2>${esc(x.material)}</h2>
+    <p class="desc" style="margin-bottom:8px">${esc(cantidadTxt(x))}</p>
+    <button class="list-opt" data-a="editar">${ico('pencil')}Editar</button>
+    <button class="list-opt peligro" data-a="borrar">${ico('trash')}Eliminar</button>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="editar"]').onclick = () => { close(); formDesperdicio(d, x); };
+      s.querySelector('[data-a="borrar"]').onclick = () => {
+        close();
+        d.desperdicios = d.desperdicios.filter(y => y.id !== x.id);
+        save(); render(); snack('Desperdicio eliminado');
+      };
+    } });
+}
+
+function formDesperdicio(d, x = null) {
+  const unidad = x?.unidad || 'm²';
+  sheet(`<h2>${x ? 'Editar desperdicio' : 'Material desperdiciado'}</h2>
+    <form class="form-sheet" novalidate>
+      ${campoHTML('material', 'Material', { valor: x?.material, ayuda: 'Por ejemplo: lona front 13 oz, vinil, acrílico 3 mm, tinta.', autofocus: true })}
+      <div class="campo">
+        <label for="f-cantidad">Cantidad</label>
+        <div class="campo-fila">
+          <input class="input" id="f-cantidad" name="cantidad" type="number" inputmode="decimal" min="0" step="any" value="${x ? esc(x.cantidad) : ''}">
+          <select class="input desp-unidad" name="unidad" aria-label="Unidad">
+            ${UNIDADES.map(u => `<option ${u === unidad ? 'selected' : ''}>${u}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="campo">
+        <label for="f-motivo">Motivo del retrabajo</label>
+        <textarea class="field desp-motivo-campo" id="f-motivo" name="motivo" placeholder="¿Qué trabajo se repitió, para qué cliente y por qué?">${esc(x?.motivo || '')}</textarea>
+      </div>
+      <div class="aviso-form" role="alert" hidden></div>
+      <div class="sheet-actions"><button class="btn fantasma" type="button" data-a="cancel">Cancelar</button>
+        <button class="btn primario" type="submit">${x ? 'Guardar' : 'Registrar'}</button></div>
+    </form>`,
+  { onMount: (s, close) => {
+      s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('#f-material').focus();
+      const form = s.querySelector('form');
+      const aviso = form.querySelector('.aviso-form');
+      form.addEventListener('submit', ev => {
+        ev.preventDefault();
+        const f = Object.fromEntries(new FormData(form));
+        const cantidad = Number(String(f.cantidad).replace(',', '.'));
+        const error = !f.material.trim() ? 'Escribe qué material se desperdició.'
+          : !(cantidad > 0) ? 'Escribe la cantidad desperdiciada.' : '';
+        if (error) { aviso.textContent = error; aviso.hidden = false; return; }
+        const datos = { material: f.material.trim(), cantidad, unidad: f.unidad, motivo: f.motivo.trim() };
+        if (x) Object.assign(x, datos);
+        else (d.desperdicios ||= []).push({ id: uid(), ...datos });
+        save(); close(); render();
+        snack(x ? 'Desperdicio guardado' : 'Desperdicio registrado');
+      });
     } });
 }
 
@@ -721,12 +813,19 @@ const blobB64 = (blob) => new Promise(res => {
 function confirmarCierre() {
   const d = dia(fechaVista);
   if (!d.entradas.length) return snack('Captura al menos una entrada para cerrar el día.');
+  const nDesp = d.desperdicios?.length || 0;
+  // Último recordatorio del desperdicio: es fácil olvidarlo y después ya no se recuerda la cantidad.
   sheet(`<h2>Cerrar el día</h2>
     <p class="desc">
       Se dejarán de aceptar entradas y se generará la bitácora con las ${d.entradas.length} entradas capturadas.</p>
+    <div class="cierre-desp">${ico('trash')}<span>${nDesp
+      ? `Material desperdiciado en retrabajos: ${nDesp} registro${nDesp === 1 ? '' : 's'}.`
+      : '¿Se desperdició material en retrabajos hoy? Regístralo antes de cerrar.'}</span>
+      <button class="btn contorno sm" data-a="desp">${nDesp ? 'Agregar otro' : 'Registrar'}</button></div>
     <div class="sheet-actions"><button class="btn fantasma" data-a="cancel">Cancelar</button><button class="btn primario" data-a="ok">Cerrar día</button></div>`,
   { onMount: (s, close) => {
       s.querySelector('[data-a="cancel"]').onclick = close;
+      s.querySelector('[data-a="desp"]').onclick = () => { close(); formDesperdicio(d); };
       s.querySelector('[data-a="ok"]').onclick = () => { close(); cerrarDia(d); };
     } });
 }
@@ -814,6 +913,7 @@ function vistaBitacora() {
   };
   der.append(add);
 
+  der.append(seccionDesperdicio(d));
   der.append(el('<div class="section-title">Cierre</div>'), bloqueCierre(d));
 
   const acciones = el(`<div class="btn-row" data-guide="acciones-bitacora">
@@ -1203,14 +1303,8 @@ function bitacoraLectura(d) {
       <div class="act-head"><span class="act-num">${i + 1}</span><h3 class="act-titulo">${esc(a.titulo)}</h3></div>
       ${a.descripcion ? `<p class="act-desc">${esc(a.descripcion)}</p>` : ''}
     </article>`)));
-    if (d.bitacora.conclusion) box.append(el(`<div class="conclusion">
-      <div class="conclusion-head"><h3>Conclusión del día</h3></div>
-      <p class="txt">${esc(d.bitacora.conclusion)}</p>
-    </div>`));
-    return box;
-  }
-  if (d.estado === 'abierto') {
-    box.append(el('<p class="lectura-nota">Aún no cierra el día. Esto es lo que lleva capturado:</p>'));
+  } else if (d.estado === 'abierto') {
+    box.append(el(`<p class="lectura-nota">${d.entradas.length ? 'Aún no cierra el día. Esto es lo que lleva capturado:' : 'Aún no cierra el día.'}</p>`));
     const lista = el('<div class="entradas"></div>');
     d.entradas.forEach(e => lista.append(el(`<div class="entrada">
       <div class="entrada-body">
@@ -1219,9 +1313,14 @@ function bitacoraLectura(d) {
       </div>
     </div>`)));
     box.append(lista);
-    return box;
+  } else {
+    box.append(el('<p class="lectura-nota">El día se cerró sin actividades.</p>'));
   }
-  box.append(el('<p class="lectura-nota">El día se cerró sin actividades.</p>'));
+  if (d.desperdicios?.length) box.append(seccionDesperdicio(d, { editable: false }));
+  if (acts.length && d.bitacora.conclusion) box.append(el(`<div class="conclusion">
+    <div class="conclusion-head"><h3>Conclusión del día</h3></div>
+    <p class="txt">${esc(d.bitacora.conclusion)}</p>
+  </div>`));
   return box;
 }
 
@@ -1843,6 +1942,30 @@ function pintarDia(doc, d, y, { subtitulo } = {}) {
     doc.text(p, M + 14, y, { lineHeightFactor: 1.35 }); y += p.length * 15 + 20;
   });
 
+  if (d.desperdicios?.length) {
+    espacio(60);
+    doc.setFont(F, 'bold'); doc.setFontSize(9); doc.setTextColor(124, 7, 166);
+    doc.text('MATERIAL DESPERDICIADO EN RETRABAJOS', M, y); y += 8;
+    doc.setDrawColor(228, 225, 232); doc.line(M, y, W - M, y); y += 18;
+    d.desperdicios.forEach(x => {
+      espacio(40);
+      doc.setFont(F, 'bold'); doc.setFontSize(11); doc.setTextColor(29, 27, 34);
+      const cant = cantidadTxt(x);
+      const t = doc.splitTextToSize(x.material, W - M * 2 - 120);
+      doc.text(t, M, y);
+      doc.text(cant, W - M, y, { align: 'right' });
+      y += t.length * 15;
+      if (x.motivo) {
+        doc.setFont(F, 'normal'); doc.setFontSize(10); doc.setTextColor(75, 72, 83);
+        const p = doc.splitTextToSize(x.motivo, W - M * 2 - 14);
+        espacio(p.length * 14);
+        doc.text(p, M + 14, y, { lineHeightFactor: 1.35 }); y += p.length * 14;
+      }
+      y += 10;
+    });
+    y += 14;
+  }
+
   if (d.bitacora?.conclusion) {
     doc.setFont(F, 'normal'); doc.setFontSize(11);
     const p = doc.splitTextToSize(d.bitacora.conclusion, W - M * 2 - 36);
@@ -1977,6 +2100,9 @@ const PASOS = {
     { t: 'boton-escribir', titulo: 'Escribir una entrada', texto: 'Si no puedes hablar, toca el teclado y escribe la entrada a mano.' },
     { t: 'entradas', titulo: 'Entradas del día',
       texto: 'Cada entrada muestra la hora, quién la capturó y el texto. Con el botón de reproducir escuchas el audio; con el de opciones editas el texto o eliminas la entrada.' },
+    { t: 'desperdicio', titulo: 'Material desperdiciado',
+      texto: 'Si en el día se repitió un trabajo y se perdió material, regístralo aquí: qué material, cuánto y por qué. Aparece en la bitácora y en el PDF.',
+      nota: 'Al cerrar el día, la app te recuerda registrarlo si aún no lo has hecho.' },
     { t: 'cerrar-dia', titulo: 'Cerrar el día',
       texto: 'Cuando termines la jornada, toca este botón. Se dejan de aceptar entradas y la app genera la bitácora con las actividades y una conclusión.',
       nota: 'Si después necesitas agregar algo, puedes reabrir el día desde la bitácora.' },
@@ -1989,6 +2115,7 @@ const PASOS = {
     { t: 'actividad', titulo: 'Actividad',
       texto: 'Toca el título o la descripción para corregirlos; se guardan al salir del texto. Con las flechas cambias el orden y con el bote la eliminas. Si viene de notas de voz, abajo puedes escuchar los audios.' },
     { t: 'agregar-actividad', titulo: 'Agregar actividad', texto: 'Agrega una actividad que no haya salido en la bitácora.' },
+    { t: 'desperdicio', titulo: 'Material desperdiciado', texto: 'El material que se perdió en retrabajos ese día. Puedes agregar, corregir o eliminar registros antes de exportar.' },
     { t: 'cierre', titulo: 'Conclusión del día', texto: 'Resume la jornada. Puedes generarla con IA, escribirla tú o corregir la que ya existe.' },
     { t: 'acciones-bitacora', titulo: 'Terminar', texto: 'Cuando la bitácora esté bien:',
       lista: [['Exportar PDF', 'la descargas, la compartes o la ves antes de enviarla.'],

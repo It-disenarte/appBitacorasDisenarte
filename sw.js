@@ -1,4 +1,4 @@
-const CACHE = 'bitacora-v5';
+const CACHE = 'bitacora-v6';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './favicon.ico', './icons/hoja.svg', './icons/hoja-blanca.svg', './icons/hoja-192.png',

@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS bitacora_usuarios (
   nombre TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
-  rol TEXT NOT NULL DEFAULT 'usuario' CHECK (rol IN ('admin', 'usuario')),
+  rol TEXT NOT NULL DEFAULT 'usuario',
   area TEXT NOT NULL DEFAULT 'Producción',
   activo BOOLEAN NOT NULL DEFAULT TRUE,
   debe_cambiar BOOLEAN NOT NULL DEFAULT FALSE,
@@ -72,7 +72,16 @@ CREATE TABLE IF NOT EXISTS bitacora_dias (
   actualizado BIGINT NOT NULL,
   guardado_en TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (usuario_id, fecha)
-);`;
+);
+CREATE INDEX IF NOT EXISTS bitacora_dias_fecha ON bitacora_dias(fecha);
+DO $$ BEGIN
+  -- Roles válidos. Se rehace solo si a la restricción le falta alguno (bases creadas antes del visor).
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'bitacora_usuarios_rol_check'
+                 AND pg_get_constraintdef(oid) LIKE '%visor%') THEN
+    ALTER TABLE bitacora_usuarios DROP CONSTRAINT IF EXISTS bitacora_usuarios_rol_check;
+    ALTER TABLE bitacora_usuarios ADD CONSTRAINT bitacora_usuarios_rol_check CHECK (rol IN ('admin', 'usuario', 'visor'));
+  END IF;
+END $$;`;
 
 /* Una vez por instancia. Si dos instancias lo corren a la vez y una choca, se reintenta. */
 function esquema() {
@@ -215,6 +224,13 @@ export async function requiereUsuario(req) {
 export async function requiereAdmin(req) {
   const u = await requiereUsuario(req);
   if (u.rol !== 'admin') throw new ErrorApi(403, 'Solo un administrador puede hacer esto.');
+  return u;
+}
+
+/* Ver las bitácoras de todos: visores y administradores. */
+export async function requiereVisor(req) {
+  const u = await requiereUsuario(req);
+  if (u.rol !== 'admin' && u.rol !== 'visor') throw new ErrorApi(403, 'Solo un visor o un administrador puede ver las bitácoras de todos.');
   return u;
 }
 

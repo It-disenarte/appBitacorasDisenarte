@@ -14,6 +14,7 @@ const hoyISO = (d = new Date()) => {
 
 /* ---------------- estado ---------------- */
 let YO = null;   // usuario con la sesión abierta
+const veEquipo = () => YO?.rol === 'visor' || YO?.rol === 'admin';   // además de las suyas, ve las bitácoras de todos
 let S = { area: { nombre: '' }, usuario: { id: '', nombre: '' }, dias: {} };
 let pendientes = new Set();   // fechas con cambios sin subir al servidor
 let enServidor = new Set();   // fechas que ya existen en el servidor
@@ -178,6 +179,8 @@ document.addEventListener('visibilitychange', () => {
   // Al salir de la app se intenta subir lo pendiente; al volver, se baja lo capturado en otro dispositivo.
   if (document.visibilityState === 'hidden' && pendientes.size) sincronizar();
   if (document.visibilityState === 'visible' && Date.now() - ultimaBajada > 5 * 60000) sincronizar({ bajar: true });
+  // En Equipo, al volver a la app se trae lo más reciente.
+  if (document.visibilityState === 'visible' && vista === 'equipo') recargarEquipoSiViejo();
 });
 
 function dia(fecha = hoyISO()) {
@@ -252,7 +255,10 @@ const ICONOS = {
   'user-check': '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m16 11 2 2 4-4"/>',
   'key': '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5"/>',
   'copy': '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
-  'log-out': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>'
+  'log-out': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+  'chevron-left': '<path d="m15 18-6-6 6-6"/>',
+  'chevron-right': '<path d="m9 18 6-6-6-6"/>',
+  'chevron-down': '<path d="m6 9 6 6 6-6"/>'
 };
 const ico = (n, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONOS[n]}</svg>`;
 const vacio = (texto) => `<div class="empty" data-guide="vacio"><img src="icons/hoja.svg" alt=""><p>${texto}</p></div>`;
@@ -294,6 +300,11 @@ function rangoSemana(lunes) {
     : `${ini.getDate()} de ${MESES[ini.getMonth()]} – ${fin.getDate()} de ${MESES[fin.getMonth()]} de ${fin.getFullYear()}`;
 }
 
+function sumarDias(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return hoyISO(new Date(y, m - 1, d + n));
+}
+
 function snack(msg) {
   const s = el(`<div class="snackbar">${esc(msg)}</div>`);
   $('#snackbar-root').append(s);
@@ -321,10 +332,15 @@ let tabHistorial = 'dias';
 
 function nav(v, fecha) {
   if (v === 'usuarios' && YO?.rol !== 'admin') v = 'hoy';
+  if (v === 'equipo' && !veEquipo()) v = 'hoy';
   vista = v;
-  if (fecha) fechaVista = fecha;
+  if (fecha && v !== 'equipo') fechaVista = fecha;
   refrescoPendiente = false;
   if (v === 'usuarios') { usuariosLista = null; cargarUsuarios(); }
+  if (v === 'equipo') {
+    equipoCache.clear();   // al entrar a la pantalla, siempre lo más reciente
+    if (fecha) equipoFecha = fecha;
+  }
   document.querySelectorAll('[data-nav]').forEach(b => {
     const on = b.dataset.nav === (v === 'bitacora' ? 'hoy' : v);
     on ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current');
@@ -334,7 +350,7 @@ function nav(v, fecha) {
   render();
   $('#main').scrollTo?.(0, 0);
   window.scrollTo(0, 0);
-  if (v !== 'usuarios') guiaAlEntrar();   // la de Usuarios sale cuando termina de cargar la lista
+  if (v !== 'usuarios' && v !== 'equipo') guiaAlEntrar();   // las de Usuarios y Equipo salen cuando terminan de cargar
 }
 document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => nav(b.dataset.nav, hoyISO()));
 
@@ -345,6 +361,7 @@ function render() {
   else if (vista === 'bitacora') m.append(...vistaBitacora());
   else if (vista === 'historial') m.append(...vistaHistorial());
   else if (vista === 'usuarios') m.append(...vistaUsuarios());
+  else if (vista === 'equipo') m.append(...vistaEquipo());
   else m.append(...vistaPerfil());
   m.classList.toggle('con-dock', Boolean(m.querySelector('.capture-dock')));
   pintarMenu();
@@ -418,8 +435,9 @@ function pintarMenu() {
   $('#instalar').hidden = !promptInstalar || instalada();
   if (!YO) return;
   $('[data-nav="usuarios"]').hidden = YO.rol !== 'admin';
+  $('[data-nav="equipo"]').hidden = !veEquipo();
   $('#pie-nombre').textContent = YO.nombre;
-  $('#pie-area').textContent = `${YO.rol === 'admin' ? 'Administrador · ' : ''}Área de ${S.area.nombre}`;
+  $('#pie-area').textContent = `${YO.rol === 'admin' ? 'Administrador · ' : YO.rol === 'visor' ? 'Visor · ' : ''}Área de ${S.area.nombre}`;
   pintarEstado();
 }
 
@@ -1018,6 +1036,195 @@ function historialDias() {
   return wrap;
 }
 
+/* ---------------- pantalla: Equipo (visor y admin) ---------------- */
+/* Las bitácoras de todos, de solo lectura y siempre desde el servidor. Se baja una semana
+   a la vez: cambiar de día dentro de la misma semana no vuelve a pedir nada. */
+let tabEquipo = 'dias';
+let equipoFecha = hoyISO();
+let equipoPersona = '';               // id como texto; '' = todas
+const equipoCache = new Map();        // lunes → { usuarios, dias, en } o { error }
+const equipoCargando = new Set();
+
+async function cargarEquipo(lunes) {
+  if (equipoCargando.has(lunes)) return;
+  equipoCargando.add(lunes);
+  const listo = cargando('Cargando bitácoras…');
+  try {
+    const r = await api(`/api/equipo?semana=${lunes}`);
+    equipoCache.set(lunes, { usuarios: r.usuarios, dias: r.dias, en: Date.now() });
+  } catch (e) {
+    if (e.status === 401) return sesionVencida();
+    equipoCache.set(lunes, { error: e.message });
+  } finally { equipoCargando.delete(lunes); listo(); }
+  if (vista === 'equipo' && YO && lunesDe(equipoFecha) === lunes) { render(); guiaAlEntrar(); }
+}
+
+function recargarEquipoSiViejo() {
+  const c = equipoCache.get(lunesDe(equipoFecha));
+  if (c && !c.error && Date.now() - c.en < 2 * 60000) return;
+  equipoCache.clear();
+  if (!$('.sheet')) render();
+}
+
+function vistaEquipo() {
+  const lunes = lunesDe(equipoFecha);
+  const hoy = hoyISO();
+  const porDia = tabEquipo === 'dias';
+  const bar = encabezado('Bitácoras del equipo', porDia ? fechaCorta(equipoFecha) : rangoSemana(lunes), null,
+    `<button class="iconbtn" id="eq-recargar" title="Actualizar" aria-label="Actualizar">${ico('refresh')}</button>`);
+  bar.querySelector('#eq-recargar').onclick = () => { equipoCache.clear(); render(); };
+
+  const page = el('<div class="page"></div>');
+  const tabs = el(`<div class="tabs" role="tablist" data-guide="equipo-pestanas">
+    <button role="tab" data-tab="dias" aria-selected="${porDia}">Por día</button>
+    <button role="tab" data-tab="semanas" aria-selected="${!porDia}">Por semana</button>
+  </div>`);
+  tabs.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tabEquipo = b.dataset.tab; render(); });
+  page.append(tabs);
+
+  const c = equipoCache.get(lunes);
+  if (!c) { cargarEquipo(lunes); return [bar, page]; }
+
+  // Barra: anterior / siguiente, ir a una fecha y filtrar por persona.
+  const paso = porDia ? 1 : 7;
+  const enActual = porDia ? equipoFecha >= hoy : lunes >= lunesDe(hoy);
+  const personas = c.usuarios || [];
+  if (equipoPersona && !personas.some(u => String(u.id) === equipoPersona)) equipoPersona = '';
+  const barra = el(`<div class="equipo-barra" data-guide="equipo-barra">
+    <div class="equipo-nav">
+      <button class="iconbtn" data-a="ant" aria-label="${porDia ? 'Día anterior' : 'Semana anterior'}" title="${porDia ? 'Día anterior' : 'Semana anterior'}">${ico('chevron-left')}</button>
+      <input class="input equipo-fecha" type="date" value="${equipoFecha}" max="${hoy}" aria-label="Ir a una fecha">
+      <button class="iconbtn" data-a="sig" ${enActual ? 'disabled' : ''} aria-label="${porDia ? 'Día siguiente' : 'Semana siguiente'}" title="${porDia ? 'Día siguiente' : 'Semana siguiente'}">${ico('chevron-right')}</button>
+      ${enActual ? '' : `<button class="btn fantasma" data-a="hoy">${porDia ? 'Hoy' : 'Esta semana'}</button>`}
+    </div>
+    <select class="input equipo-persona-sel" aria-label="Persona">
+      <option value="">Todas las personas</option>
+      ${personas.map(u => `<option value="${u.id}" ${String(u.id) === equipoPersona ? 'selected' : ''}>${esc(u.nombre)} · ${esc(u.area)}</option>`).join('')}
+    </select>
+  </div>`);
+  const ir = (f) => { equipoFecha = f > hoy ? hoy : f; render(); };
+  barra.querySelector('[data-a="ant"]').onclick = () => ir(sumarDias(equipoFecha, -paso));
+  barra.querySelector('[data-a="sig"]').onclick = () => ir(sumarDias(equipoFecha, paso));
+  barra.querySelector('[data-a="hoy"]')?.addEventListener('click', () => ir(hoy));
+  barra.querySelector('.equipo-fecha').onchange = e => { if (/^\d{4}-\d{2}-\d{2}$/.test(e.target.value)) ir(e.target.value); };
+  barra.querySelector('.equipo-persona-sel').onchange = e => { equipoPersona = e.target.value; render(); };
+  page.append(barra);
+
+  if (c.error) {
+    page.append(el(`<div class="aviso">${ico('alert')}<div><strong>No se pudieron cargar las bitácoras.</strong><div class="aviso-detalle">${esc(c.error)}</div></div></div>`));
+    const b = el(`<button class="btn contorno">${ico('refresh')}Reintentar</button>`);
+    b.onclick = () => { equipoCache.delete(lunes); render(); };
+    page.append(b);
+    return [bar, page];
+  }
+
+  const visibles = personas.filter(u => !equipoPersona || String(u.id) === equipoPersona);
+  page.append(porDia ? equipoDia(c, visibles) : equipoSemana(c, visibles, lunes));
+  return [bar, page];
+}
+
+function personaHead(u, extra = '') {
+  return `<div class="equipo-persona-head">
+    <div class="avatar">${esc(u.nombre.trim()[0]?.toUpperCase() || '?')}</div>
+    <div class="equipo-persona-id">
+      <div class="equipo-nombre">${esc(u.nombre)}</div>
+      <div class="dia-meta">Área de ${esc(u.area)}</div>
+    </div>
+    ${extra}
+  </div>`;
+}
+
+const sinBitacora = (lista, cuando) => el(`<p class="equipo-sin" data-guide="equipo-sin"><strong>Sin bitácora ${cuando}:</strong> ${lista.map(u => esc(u.nombre)).join(', ')}</p>`);
+
+function equipoDia(c, personas) {
+  const cont = el('<div></div>');
+  const faltan = [];
+  let primero = true;
+  personas.forEach(u => {
+    const d = c.dias.find(x => x.usuarioId === u.id && x.fecha === equipoFecha);
+    if (!d) return faltan.push(u);
+    const card = el(`<article class="card equipo-persona" ${primero ? 'data-guide="equipo-persona"' : ''}>
+      ${personaHead(u, `<span class="chip-estado" data-estado="${d.estado}">${d.estado === 'abierto' ? 'en curso' : d.estado}</span>`)}
+    </article>`);
+    card.append(bitacoraLectura(d));
+    cont.append(card);
+    primero = false;
+  });
+  if (primero) cont.append(el(vacio(equipoPersona
+    ? 'Esta persona no registró bitácora este día.'
+    : 'Nadie registró bitácora este día.')));
+  if (faltan.length && !(equipoPersona && primero)) cont.append(sinBitacora(faltan, 'este día'));
+  return cont;
+}
+
+function equipoSemana(c, personas, lunes) {
+  const cont = el('<div></div>');
+  const faltan = [];
+  let primero = true;
+  personas.forEach(u => {
+    const dias = c.dias.filter(x => x.usuarioId === u.id).sort((a, b) => a.fecha.localeCompare(b.fecha));
+    if (!dias.length) return faltan.push(u);
+    const acts = dias.reduce((n, d) => n + (d.bitacora?.actividades.length || 0), 0);
+    const card = el(`<article class="card equipo-persona" ${primero ? 'data-guide="equipo-persona"' : ''}>
+      ${personaHead(u)}
+      <div class="dia-meta equipo-resumen">${dias.length} día${dias.length === 1 ? '' : 's'} · ${acts} actividad${acts === 1 ? '' : 'es'}</div>
+    </article>`);
+    dias.forEach(d => {
+      const n = d.bitacora?.actividades.length || 0;
+      // Con una sola persona a la vista se abren todos los días; con varias, solo se listan.
+      const det = el(`<details class="equipo-dia" ${equipoPersona ? 'open' : ''}>
+        <summary>
+          <span class="equipo-dia-fecha">${esc(fechaCorta(d.fecha))}</span>
+          <span class="dia-meta">${d.estado === 'abierto' ? `${d.entradas.length} entrada${d.entradas.length === 1 ? '' : 's'}` : `${n} actividad${n === 1 ? '' : 'es'}`}</span>
+          <span class="chip-estado" data-estado="${d.estado}">${d.estado === 'abierto' ? 'en curso' : d.estado}</span>
+          ${ico('chevron-down', 'equipo-chevron')}
+        </summary>
+      </details>`);
+      det.append(bitacoraLectura(d));
+      card.append(det);
+    });
+    cont.append(card);
+    primero = false;
+  });
+  if (primero) cont.append(el(vacio(equipoPersona
+    ? 'Esta persona no registró bitácoras esta semana.'
+    : `Nadie registró bitácoras en la semana del ${rangoSemana(lunes)}.`)));
+  if (faltan.length && !(equipoPersona && primero)) cont.append(sinBitacora(faltan, 'esta semana'));
+  return cont;
+}
+
+/* La bitácora de un día tal como se entregaría, sin edición. Si el día sigue abierto,
+   se muestran las entradas que lleva capturadas. */
+function bitacoraLectura(d) {
+  const box = el('<div class="lectura"></div>');
+  const acts = d.bitacora?.actividades || [];
+  if (acts.length) {
+    acts.forEach((a, i) => box.append(el(`<article class="act">
+      <div class="act-head"><span class="act-num">${i + 1}</span><h3 class="act-titulo">${esc(a.titulo)}</h3></div>
+      ${a.descripcion ? `<p class="act-desc">${esc(a.descripcion)}</p>` : ''}
+    </article>`)));
+    if (d.bitacora.conclusion) box.append(el(`<div class="conclusion">
+      <div class="conclusion-head"><h3>Conclusión del día</h3></div>
+      <p class="txt">${esc(d.bitacora.conclusion)}</p>
+    </div>`));
+    return box;
+  }
+  if (d.estado === 'abierto') {
+    box.append(el('<p class="lectura-nota">Aún no cierra el día. Esto es lo que lleva capturado:</p>'));
+    const lista = el('<div class="entradas"></div>');
+    d.entradas.forEach(e => lista.append(el(`<div class="entrada">
+      <div class="entrada-body">
+        <div class="entrada-meta"><span>${esc(e.hora)}</span>${e.tipo === 'audio' ? `<span>·</span>${ico('mic')}` : ''}</div>
+        <p class="entrada-texto">${esc(e.contenido)}</p>
+      </div>
+    </div>`)));
+    box.append(lista);
+    return box;
+  }
+  box.append(el('<p class="lectura-nota">El día se cerró sin actividades.</p>'));
+  return box;
+}
+
 /* ---------------- pantalla: Perfil ---------------- */
 function vistaPerfil() {
   const bar = encabezado('Perfil', `Hola, ${YO.nombre.split(' ')[0]}`);
@@ -1112,6 +1319,7 @@ function vistaUsuarios() {
       <div class="usuario-body">
         <div class="usuario-nombre">${esc(u.nombre)}${propio ? ' <span class="usuario-tu">(tú)</span>' : ''}
           ${u.rol === 'admin' ? '<span class="chip-estado" data-estado="admin">Admin</span>' : ''}
+          ${u.rol === 'visor' ? '<span class="chip-estado" data-estado="visor">Visor</span>' : ''}
           ${u.activo ? '' : '<span class="chip-estado" data-estado="inactivo">Desactivado</span>'}
         </div>
         <div class="usuario-meta">${esc(u.email)}</div>
@@ -1175,10 +1383,11 @@ function formUsuario(u = null) {
       <div class="campo">
         <label for="f-rol">Rol</label>
         <select class="input" id="f-rol" name="rol" ${propio ? 'disabled' : ''}>
-          <option value="usuario" ${u?.rol !== 'admin' ? 'selected' : ''}>Usuario: captura sus bitácoras</option>
-          <option value="admin" ${u?.rol === 'admin' ? 'selected' : ''}>Administrador: además administra usuarios</option>
+          <option value="usuario" ${!u || u.rol === 'usuario' ? 'selected' : ''}>Usuario: captura sus bitácoras</option>
+          <option value="visor" ${u?.rol === 'visor' ? 'selected' : ''}>Visor: captura sus bitácoras y además ve las de todos</option>
+          <option value="admin" ${u?.rol === 'admin' ? 'selected' : ''}>Administrador: captura, ve todo y administra usuarios</option>
         </select>
-        ${propio ? '<span class="ayuda">No puedes cambiar tu propio rol.</span>' : ''}
+        <span class="ayuda">${propio ? 'No puedes cambiar tu propio rol.' : 'El visor usa la app como cualquier usuario y, además, en Equipo ve las bitácoras de todos por día y por semana, sin que le manden PDF.'}</span>
       </div>
       ${nuevo ? `<div class="campo">
         <label for="f-password">Contraseña temporal</label>
@@ -1487,6 +1696,7 @@ function olvidarSesion() {
   S = { area: { nombre: '' }, usuario: { id: '', nombre: '' }, dias: {} };
   pendientes = new Set(); enServidor = new Set(); firmas = {};
   usuariosLista = null;
+  equipoCache.clear(); equipoPersona = ''; tabEquipo = 'dias';
   guiaVista.clear();
   if (rec) cancelarGrabacion();
 }
@@ -1731,13 +1941,16 @@ let guiaActual = null;
 
 const PASOS_MENU = () => [
   { titulo: '¡Bienvenido a Bitácora!',
-    texto: 'Aquí registras lo que pasa en tu área durante el día, por voz o por escrito. Al cerrar el día, la app arma la bitácora con inteligencia artificial y la exportas en PDF para tu gerente. Este asistente te explica cada pantalla.',
+    texto: 'Aquí registras lo que pasa en tu área durante el día, por voz o por escrito. Al cerrar el día, la app arma la bitácora con inteligencia artificial y la exportas en PDF para tu gerente.'
+      + (YO?.rol === 'visor' ? ' Como visor, además ves en Equipo las bitácoras de todos, por día y por semana.' : '')
+      + ' Este asistente te explica cada pantalla.',
     nota: 'Avanza con "Siguiente" o con las flechas del teclado. "Saltar" cierra la guía de esta pantalla. Si ya no la necesitas, marca la casilla de abajo.' },
   { t: 'menu-boton', titulo: 'Botón de menú',
     texto: 'Toca este botón para abrir el menú. Desde ahí cambias de pantalla y ajustas el asistente. Se cierra con la ×, al tocar fuera o al elegir una opción.' },
   { t: 'menu-secciones', m: true, titulo: 'Secciones', texto: 'Estas son las pantallas de la app:',
     lista: [['Hoy', 'capturas las entradas del día y lo cierras para generar la bitácora.'],
             ['Historial', 'consultas los días cerrados y exportas el PDF de un día o de toda la semana.'],
+            ...(veEquipo() ? [['Equipo', 'ves las bitácoras de todas las personas, por día o por semana.']] : []),
             ['Perfil', 'cambias el nombre del área y tu nombre.'],
             ...(YO?.rol === 'admin' ? [['Usuarios', 'creas y administras las cuentas de quienes usan la app (solo administradores).']] : [])] },
   { t: 'menu-cuenta', m: true, titulo: 'Cuenta', texto: 'Opciones para usar la app:',
@@ -1791,6 +2004,18 @@ const PASOS = {
     { t: 'semana', titulo: 'Una semana', texto: 'Resume los días cerrados de esa semana. Toca un día para abrirlo o "PDF de la semana" para exportarlos todos en un solo archivo.' },
     { t: 'vacio', titulo: 'Todavía sin días', texto: 'Cuando cierres tu primer día, aparecerá aquí.' }
   ],
+  equipo: () => [
+    { titulo: 'Bitácoras del equipo',
+      texto: 'Aquí ves, sin descargar nada, las bitácoras de todas las personas que capturan. Cada vez que entras a esta pantalla se trae lo más reciente.' },
+    { t: 'equipo-pestanas', titulo: 'Por día o por semana',
+      texto: 'Por día ves lo que registró cada persona en una fecha. Por semana ves los días de cada persona; toca un día para abrir su bitácora.' },
+    { t: 'equipo-barra', titulo: 'Cambiar de fecha o de persona',
+      texto: 'Con las flechas vas al día o a la semana anterior o siguiente, con el calendario saltas a cualquier fecha y con el selector ves solo a una persona.' },
+    { t: 'equipo-persona', titulo: 'La bitácora de una persona',
+      texto: 'Muestra sus actividades y la conclusión del día, tal como las dejó. Si aún no cierra el día, aparece "en curso" con las entradas que lleva capturadas.' },
+    { t: 'equipo-sin', titulo: 'Sin bitácora', texto: 'Aquí aparecen quienes no registraron nada en esa fecha.' },
+    { t: 'vacio', titulo: 'Todavía sin bitácoras', texto: 'Cuando alguien capture o cierre su día, aparecerá aquí.' }
+  ],
   perfil: () => [
     { titulo: 'Perfil', texto: 'Aquí ajustas los datos que aparecen en la bitácora. Los cambios se guardan al salir de cada campo.' },
     { t: 'perfil-area', titulo: 'Nombre del área', texto: 'Aparece en cada pantalla y en el PDF. Cámbialo si capturas para otra área.' },
@@ -1798,9 +2023,10 @@ const PASOS = {
     { t: 'perfil-datos', titulo: 'Datos', texto: 'Cuántos días tienes guardados en tu cuenta.' }
   ],
   usuarios: () => [
-    { titulo: 'Usuarios', texto: 'Aquí administras quién puede entrar a Bitácora. Cada persona tiene su cuenta y ve solo sus propias bitácoras.' },
+    { titulo: 'Usuarios', texto: 'Aquí administras quién puede entrar a Bitácora. Cada persona tiene su cuenta y ve solo sus propias bitácoras; los visores y administradores ven las de todos en Equipo.' },
     { t: 'nuevo-usuario', titulo: 'Nuevo usuario',
       texto: 'Crea la cuenta con nombre, correo, área, rol y una contraseña temporal. Al terminar te muestra los datos para que se los compartas.',
+      lista: [['Usuario', 'captura sus bitácoras.'], ['Visor', 'captura sus bitácoras y además ve las de todos por día y por semana.'], ['Administrador', 'captura, ve todo y administra usuarios.']],
       nota: 'En su primer acceso, la app le pide crear su propia contraseña.' },
     { t: 'usuario', titulo: 'Una cuenta', texto: 'Muestra el correo, el área, cuántos días ha cerrado y su último acceso. Con el botón de opciones:',
       lista: [['Editar datos', 'cambias nombre, correo, área o rol.'],

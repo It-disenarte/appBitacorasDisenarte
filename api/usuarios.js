@@ -1,8 +1,8 @@
 /* Panel de administración: alta, edición, contraseña temporal, baja.
-   Solo para administradores. */
+   Solo para administradores. Roles: admin, usuario (captura) y visor (captura y además ve las de todos). */
 import { ruta, q, ErrorApi, texto, correo, password, requiereAdmin, hashPassword } from './_servidor.js';
 
-const ROLES = new Set(['admin', 'usuario']);
+const ROLES = new Set(['admin', 'usuario', 'visor']);
 const rol = (v) => { if (!ROLES.has(v)) throw new ErrorApi(400, 'Rol no válido.'); return v; };
 
 const fila = (u) => ({

@@ -46,7 +46,9 @@ npm start                 # http://localhost:3000
 
 ## Cuentas y datos
 
-- **Roles:** `admin` (captura sus bitácoras y administra usuarios) y `usuario` (solo sus bitácoras).
+- **Roles:** `admin` (captura sus bitácoras, ve las de todos y administra usuarios), `usuario` (solo sus
+  bitácoras) y `visor` (igual que un usuario y, además, en la pantalla Equipo ve las bitácoras de todos por
+  día y por semana, sin necesidad de PDF). La pantalla Equipo lee de `/api/equipo` y siempre muestra lo más reciente del servidor.
   Siempre queda al menos un admin activo; nadie puede quitarse el rol ni desactivarse a sí mismo.
 - **Sesión:** cookie HttpOnly de 30 días que se renueva sola; las contraseñas se guardan con scrypt.
   Tras 5 intentos fallidos la cuenta se bloquea 10 minutos (restablecer la contraseña la desbloquea).

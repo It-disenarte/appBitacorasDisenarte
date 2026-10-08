@@ -267,6 +267,40 @@ select.input:disabled{cursor:not-allowed}
 .semana-dia:hover{background:var(--muted)}
 .semana-dia-n{display:grid;place-items:center;min-width:22px;height:22px;padding:0 6px;border-radius:999px;background:rgba(124,7,166,.1);color:var(--morado);font-size:11px;font-weight:600}
 
+/* ---------- equipo (visor y admin) ---------- */
+.equipo-barra{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-bottom:16px}
+.equipo-nav{display:flex;align-items:center;gap:8px;flex:1 1 320px;min-width:0}
+.equipo-fecha{height:40px;width:auto;flex:0 1 180px;min-width:0}
+.equipo-persona-sel{height:40px;flex:1 1 220px;max-width:360px}
+.equipo-persona{margin-bottom:12px}
+.equipo-persona-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.equipo-persona-id{flex:1;min-width:0}
+.equipo-nombre{font-size:15px;font-weight:600;overflow-wrap:anywhere}
+.equipo-resumen{margin:-6px 0 4px 46px}
+.equipo-dia{border-top:1px solid var(--borde)}
+.equipo-dia summary{display:flex;align-items:center;gap:10px;min-height:48px;padding:8px 2px;cursor:pointer;list-style:none}
+.equipo-dia summary::-webkit-details-marker{display:none}
+.equipo-dia summary:hover .equipo-dia-fecha{color:var(--morado)}
+.equipo-dia-fecha{flex:1;min-width:0;font-size:14px;font-weight:600}
+.equipo-dia-fecha::first-letter{text-transform:uppercase}
+.equipo-dia summary .dia-meta{margin:0}
+.equipo-chevron{color:var(--texto-3);transition:transform .15s}
+.equipo-dia[open] .equipo-chevron{transform:rotate(180deg)}
+.equipo-dia .lectura{padding:4px 0 14px}
+.lectura .act{box-shadow:none}
+.lectura .act-titulo,.lectura .act-desc,.lectura .conclusion .txt{cursor:auto}
+.lectura .act:last-of-type{margin-bottom:12px}
+.lectura-nota{margin:0 0 10px;font-size:13px;color:var(--texto-3)}
+.equipo-sin{margin:16px 0 0;font-size:13px;line-height:1.5;color:var(--texto-3)}
+.equipo-sin strong{font-weight:600;color:var(--texto-2)}
+.chip-estado[data-estado="visor"]{height:20px;background:rgba(92,198,208,.18);color:#1E6A72}
+@media (max-width:520px){
+  .equipo-dia summary{flex-wrap:wrap;gap:4px 10px}
+  .equipo-dia-fecha{flex-basis:100%}
+  .equipo-dia summary .equipo-chevron{margin-left:auto}
+  .equipo-persona-sel{max-width:none}
+}
+
 /* ---------- hojas emergentes y diálogos ---------- */
 .scrim{position:fixed;inset:0;background:rgba(29,27,34,.4);z-index:50;animation:fade .2s ease}
 @keyframes fade{from{opacity:0}to{opacity:1}}

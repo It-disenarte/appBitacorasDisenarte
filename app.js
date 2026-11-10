@@ -27,6 +27,10 @@ function cargarLocal() {
   let raw = null;
   try { raw = JSON.parse(localStorage.getItem(keyUsuario(YO.id))); } catch {}
   S = { area: { nombre: YO.area }, usuario: { id: YO.id, nombre: YO.nombre }, dias: raw?.dias || {} };
+  // Si el teléfono cerró la app mientras transcribía, la petición se perdió: pasa a error para poder reintentar.
+  for (const d of Object.values(S.dias)) for (const e of d.entradas || []) {
+    if (e.estado === 'procesando') { e.estado = 'error'; e.errorIA = 'La transcripción se interrumpió (la app se cerró o pasó a segundo plano). Pulsa Reintentar.'; }
+  }
   pendientes = new Set(raw?.pendientes || []);
   enServidor = new Set(raw?.enServidor || []);
   firmas = Object.fromEntries(Object.entries(S.dias).map(([f, d]) => [f, firma(d)]));
@@ -57,17 +61,23 @@ function save() {
 const espera = (ms) => new Promise(r => setTimeout(r, ms));
 
 /* fetch con JSON. Lanza Error con el mensaje del servidor; e.offline si no hubo red. */
-async function api(url, metodo = 'GET', datos) {
+async function api(url, metodo = 'GET', datos, { timeout = 0 } = {}) {
   let r;
+  const ctl = timeout ? new AbortController() : null;
+  const t = timeout ? setTimeout(() => ctl.abort(), timeout) : 0;
   try {
     r = await fetch(url, {
+      signal: ctl?.signal,
       method: metodo, credentials: 'same-origin',
       headers: datos ? { 'Content-Type': 'application/json' } : {},
       body: datos ? JSON.stringify(datos) : undefined
     });
   } catch {
-    const e = new Error('Sin conexión. Revisa tu internet e intenta de nuevo.'); e.offline = true; throw e;
-  }
+    const e = ctl?.signal.aborted
+      ? new Error('La IA tardó demasiado en responder. Revisa tu señal e intenta de nuevo.')
+      : new Error('Sin conexión. Revisa tu internet e intenta de nuevo.');
+    e.offline = true; throw e;
+  } finally { clearTimeout(t); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { const e = new Error(j.error || `Error del servidor (${r.status}).`); e.status = r.status; throw e; }
   return j;
@@ -75,7 +85,7 @@ async function api(url, metodo = 'GET', datos) {
 
 /* Para las funciones de IA: si la sesión venció, vuelve al login. */
 async function apiIA(url, datos) {
-  try { return await api(url, 'POST', datos); }
+  try { return await api(url, 'POST', datos, { timeout: 90000 }); }
   catch (e) { if (e.status === 401) sesionVencida(); throw e; }
 }
 
@@ -750,7 +760,7 @@ function detenerGrabacion() {
     limpiarGrabacion(); rec = null;
     if (dur < 700) return snack('Grabación muy corta. Habla antes de detenerla.');
     const e = agregarEntrada({ tipo: 'audio', estado: 'procesando' });
-    await putAudio(e.id, blob);
+    try { await putAudio(e.id, blob); } catch (err) { console.warn('No se pudo guardar el audio local:', err.message || err); }
     transcribir(e, blob);
   };
   rec.stop();
@@ -789,10 +799,18 @@ async function transcribir(e, blob) {
     try { envio = await aWav(blob); mime = 'audio/wav'; }
     catch (err) { console.warn('No se pudo convertir a WAV, se envía el original:', err.message || err); }
 
-    if (envio.size > 3.8 * 1024 * 1024) throw new Error('La nota es demasiado larga para transcribirla de una vez. Grábala en partes más cortas.');
+    if (envio.size > 12 * 1024 * 1024) throw new Error('La nota es demasiado larga para transcribirla de una vez. Grábala en partes más cortas.');
 
     const b64 = await blobB64(envio);
-    const { texto } = await apiIA('/api/transcribir', { audio: b64, mime });
+    let r;
+    try { r = await apiIA('/api/transcribir', { audio: b64, mime }); }
+    catch (err) {
+      // Señal móvil inestable: un reintento automático antes de rendirse.
+      if (!err.offline) throw err;
+      await espera(2000);
+      r = await apiIA('/api/transcribir', { audio: b64, mime });
+    }
+    const { texto } = r;
     if (!texto) throw new Error('vacío');
     e.contenido = texto; e.transcripcionRaw = texto; e.estado = 'listo';
   } catch (err) {
